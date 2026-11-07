@@ -4,7 +4,7 @@ Real-time move assistant for chess.com/play. Captures the board off the screen,
 finds the best move with Stockfish, and draws an arrow over your board showing
 where to move.
 
-## Install
+## Install on Windows
 
 1. `python -m venv .venv`
 2. `.venv\Scripts\pip install -r requirements.txt`
@@ -12,6 +12,22 @@ where to move.
 
 Or just double-click `start.bat` — it creates the venv, installs everything, and
 runs setup on first launch.
+
+## Install on macOS
+
+1. Install [Homebrew](https://brew.sh) and Python 3 from
+   [python.org](https://www.python.org/downloads/macos/) if they are not already
+   installed.
+2. Double-click `start.command`. It creates the virtual environment, installs
+   the Python packages and Stockfish, downloads the piece templates, and starts
+   ChessHelper.
+3. On first launch, allow both **Screen Recording** and **Accessibility** in
+   **System Settings → Privacy & Security**. Close the Terminal window and
+   double-click `start.command` again after granting them.
+
+If macOS refuses to open the launcher after downloading the repository, open
+Terminal in the project folder and run `chmod +x start.command`, then run it
+again. Apple Silicon and Intel Homebrew paths are both detected automatically.
 
 ## Usage
 
@@ -32,6 +48,9 @@ runs setup on first launch.
 | F10  | calibrate board               |
 | F11  | switch your color (white/black) |
 | F8   | quit                          |
+
+On a Mac keyboard configured to use media controls, hold `fn` while pressing
+the function-key shortcuts.
 
 ## How it works
 
@@ -66,3 +85,5 @@ runs setup on first launch.
   waiting for the opponent's turn.
 - The overlay is click-through and invisible to the game page; all clicks land
   on chess.com as normal.
+- On macOS, the capture path explicitly reads the windows beneath the overlay,
+  so the animated guide cannot contaminate board recognition.

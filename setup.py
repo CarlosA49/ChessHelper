@@ -1,5 +1,7 @@
 """One-time setup: download Stockfish and chess.com piece templates."""
 import os
+import shutil
+import subprocess
 import sys
 import urllib.request
 import zipfile
@@ -37,6 +39,33 @@ def fetch(url, dest):
 
 
 def setup_stockfish():
+    if sys.platform == "darwin":
+        existing = (shutil.which("stockfish")
+                    or next((path for path in (
+                        "/opt/homebrew/bin/stockfish",
+                        "/usr/local/bin/stockfish",
+                    ) if os.path.isfile(path)), None))
+        if existing:
+            print("[stockfish] system installation found:", existing)
+            return True
+        brew = shutil.which("brew")
+        if not brew:
+            print("[stockfish] Homebrew is required on macOS.")
+            print("Install it from https://brew.sh and run start.command again.")
+            return False
+        print("[stockfish] installing with Homebrew...")
+        result = subprocess.run([brew, "install", "stockfish"], check=False)
+        installed = (shutil.which("stockfish")
+                     or next((path for path in (
+                         "/opt/homebrew/bin/stockfish",
+                         "/usr/local/bin/stockfish",
+                     ) if os.path.isfile(path)), None))
+        if result.returncode == 0 and installed:
+            print("[stockfish] Homebrew installation ready")
+            return True
+        print("[stockfish] Homebrew could not install Stockfish.")
+        return False
+
     exe = os.path.join(SF_DIR, "stockfish.exe")
     if os.path.isfile(exe):
         print("[stockfish] already present:", exe)

@@ -7,6 +7,8 @@ import ctypes
 import json
 import os
 import queue
+import shutil
+import sys
 import threading
 import time
 
@@ -21,12 +23,59 @@ import overlay as ovl
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(BASE, "config.json")
-STOCKFISH = os.path.join(BASE, "stockfish", "stockfish.exe")
+LOCAL_STOCKFISH = os.path.join(
+    BASE, "stockfish", "stockfish.exe" if sys.platform == "win32" else "stockfish")
 
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    ctypes.windll.user32.SetProcessDPIAware()
+if sys.platform == "win32":
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        ctypes.windll.user32.SetProcessDPIAware()
+
+
+def stockfish_path():
+    """Find Stockfish from an override, local setup, or the system PATH."""
+    candidates = [
+        os.environ.get("CHESSHELPER_STOCKFISH"),
+        LOCAL_STOCKFISH,
+        shutil.which("stockfish"),
+        "/opt/homebrew/bin/stockfish",
+        "/usr/local/bin/stockfish",
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return LOCAL_STOCKFISH
+
+
+def macos_permissions_ready():
+    """Request the two macOS permissions needed by capture and hotkeys."""
+    if sys.platform != "darwin":
+        return True
+    try:
+        import Quartz
+        from ApplicationServices import (
+            AXIsProcessTrustedWithOptions,
+            kAXTrustedCheckOptionPrompt,
+        )
+
+        screen = bool(Quartz.CGPreflightScreenCaptureAccess())
+        if not screen:
+            Quartz.CGRequestScreenCaptureAccess()
+        accessibility = bool(AXIsProcessTrustedWithOptions({
+            kAXTrustedCheckOptionPrompt: True,
+        }))
+        if screen and accessibility:
+            return True
+        print()
+        print("ChessHelper needs Screen Recording and Accessibility access.")
+        print("Enable both in System Settings > Privacy & Security, then")
+        print("close this Terminal window and run start.command again.")
+        return False
+    except Exception as error:
+        print("Could not check macOS permissions:", error)
+        print("Run start.command again after dependencies finish installing.")
+        return False
 
 
 def load_cfg():
@@ -343,6 +392,7 @@ class Assistant:
 
     def start(self):
         self.overlay = ovl.Overlay()
+        capture.set_excluded_window(self.overlay.capture_window_id)
         self.overlay.set_board_rect(self.cfg.get("rect"))
         if not self.templates:
             print("Piece templates missing or incomplete.")
@@ -351,7 +401,7 @@ class Assistant:
             self.overlay.destroy()
             return
         try:
-            self.engine = eng.Engine(STOCKFISH)
+            self.engine = eng.Engine(stockfish_path())
         except FileNotFoundError as e:
             print(e)
             print("Run: .venv\\Scripts\\python setup.py")
@@ -383,6 +433,8 @@ class Assistant:
 
 
 def main():
+    if not macos_permissions_ready():
+        return
     Assistant().start()
 
 

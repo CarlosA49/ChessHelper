@@ -23,7 +23,7 @@ class Engine:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         self._send("uci")
         self._wait("uciok")

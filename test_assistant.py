@@ -1,7 +1,9 @@
 """Integration tests for turn-to-arrow behavior without a desktop game."""
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 import unittest.mock
 
@@ -192,6 +194,36 @@ def test_float_config_rect_is_normalized_for_screen_capture():
     assert cfg["rect"] == [100, 201, 900, 1001]
 
 
+def test_stockfish_environment_override_is_cross_platform():
+    with tempfile.TemporaryDirectory() as tmp:
+        executable = os.path.join(tmp, "stockfish-custom")
+        with open(executable, "wb") as f:
+            f.write(b"test")
+        with unittest.mock.patch.dict(
+                os.environ, {"CHESSHELPER_STOCKFISH": executable}):
+            assert main.stockfish_path() == executable
+
+
+def test_macos_permission_check_is_noop_on_other_platforms():
+    with unittest.mock.patch.object(main.sys, "platform", "win32"):
+        assert main.macos_permissions_ready()
+
+
+def test_macos_permission_check_uses_native_authorization_apis():
+    quartz = types.ModuleType("Quartz")
+    quartz.CGPreflightScreenCaptureAccess = lambda: True
+    quartz.CGRequestScreenCaptureAccess = lambda: False
+    services = types.ModuleType("ApplicationServices")
+    services.kAXTrustedCheckOptionPrompt = "prompt"
+    services.AXIsProcessTrustedWithOptions = (
+        lambda options: options == {"prompt": True})
+    with (unittest.mock.patch.object(main.sys, "platform", "darwin"),
+          unittest.mock.patch.dict(
+              sys.modules,
+              {"Quartz": quartz, "ApplicationServices": services})):
+        assert main.macos_permissions_ready()
+
+
 def load_tests(loader, tests, pattern):
     suite = unittest.TestSuite()
     for fn in (
@@ -203,6 +235,9 @@ def load_tests(loader, tests, pattern):
         test_midgame_attachment_does_not_invent_castling_rights,
         test_failed_analysis_remains_pending_and_can_retry_same_position,
         test_float_config_rect_is_normalized_for_screen_capture,
+        test_stockfish_environment_override_is_cross_platform,
+        test_macos_permission_check_is_noop_on_other_platforms,
+        test_macos_permission_check_uses_native_authorization_apis,
     ):
         suite.addTest(unittest.FunctionTestCase(fn))
     return suite
@@ -217,4 +252,7 @@ if __name__ == "__main__":
     test_midgame_attachment_does_not_invent_castling_rights()
     test_failed_analysis_remains_pending_and_can_retry_same_position()
     test_float_config_rect_is_normalized_for_screen_capture()
+    test_stockfish_environment_override_is_cross_platform()
+    test_macos_permission_check_is_noop_on_other_platforms()
+    test_macos_permission_check_uses_native_authorization_apis()
     print("assistant start-position arrow test: PASS")

@@ -1,0 +1,32 @@
+name: Cross-platform tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Install Stockfish and piece templates
+        run: python setup.py
+      - name: Run unit tests
+        run: python -m unittest discover -v
+      - name: Run vision and engine self-test
+        run: python selftest.py
+      - name: Compile all Python sources
+        shell: bash
+        run: python -m py_compile *.py

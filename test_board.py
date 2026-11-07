@@ -2,8 +2,10 @@
 import unittest
 
 import chess
+import numpy as np
 
 import board as bm
+import capture
 from test_assistant import test_start_position_queues_white_move_arrow
 from calibrate import grid_lines, normalize_rect, window_geometry
 from overlay import move_label_position, screen_to_local
@@ -55,6 +57,17 @@ class OrientationTests(unittest.TestCase):
 
 
 class CalibrationTests(unittest.TestCase):
+    def test_coregraphics_bgra_conversion_removes_row_padding(self):
+        raw = bytes([
+            1, 2, 3, 255, 4, 5, 6, 255, 99, 99, 99, 99,
+            7, 8, 9, 255, 10, 11, 12, 255, 88, 88, 88, 88,
+        ])
+        image = capture._bytes_to_bgr(raw, width=2, height=2, bytes_per_row=12)
+        np.testing.assert_array_equal(image, np.array([
+            [[1, 2, 3], [4, 5, 6]],
+            [[7, 8, 9], [10, 11, 12]],
+        ], dtype=np.uint8))
+
     def test_corner_order_is_normalized(self):
         self.assertEqual(normalize_rect([(900, 900), (100, 100)]),
                          [100, 100, 900, 900])

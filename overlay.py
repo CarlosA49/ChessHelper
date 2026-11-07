@@ -1,6 +1,8 @@
 """Polished transparent, click-through, animated move overlay."""
 import ctypes
 import math
+import os
+import sys
 import tkinter as tk
 
 import mss
@@ -74,15 +76,26 @@ class Overlay:
         self._phase = 0.0
         self._status_ring = None
         self._animation_job = None
+        self._mac_window = None
+        self.capture_window_id = None
+        self._window_title = f"ChessHelper Overlay {os.getpid()}"
+        transparent_bg = "systemTransparent" if sys.platform == "darwin" else KEY
 
         self.root = tk.Tk()
+        self.root.title(self._window_title)
         self.root.overrideredirect(True)
         self.root.geometry(window_geometry(width, height, left, top))
         self.root.attributes("-topmost", True)
-        self.root.attributes("-transparentcolor", KEY)
-        self.root.configure(bg=KEY)
+        if sys.platform == "win32":
+            self.root.attributes("-transparentcolor", KEY)
+        elif sys.platform == "darwin":
+            try:
+                self.root.attributes("-transparent", True)
+            except tk.TclError:
+                pass
+        self.root.configure(bg=transparent_bg)
         self.canvas = tk.Canvas(
-            self.root, bg=KEY, highlightthickness=0, bd=0)
+            self.root, bg=transparent_bg, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
         self._click_through()
         self.root.update()
@@ -90,9 +103,13 @@ class Overlay:
         self._animation_job = self.root.after(self.FRAME_MS, self._animate)
 
     def _hwnd(self):
+        if sys.platform != "win32":
+            return None
         return ctypes.windll.user32.GetParent(self.root.winfo_id())
 
     def _click_through(self):
+        if sys.platform != "win32":
+            return
         hwnd = self._hwnd()
         GWL_EXSTYLE = -20
         WS_EX_LAYERED = 0x00080000
@@ -106,11 +123,60 @@ class Overlay:
 
     def _exclude_from_capture(self):
         """Keep the UI visible to the player but invisible to board capture."""
+        if sys.platform == "darwin":
+            return self._configure_macos_window()
+        if sys.platform != "win32":
+            return False
         WDA_EXCLUDEFROMCAPTURE = 0x00000011
         try:
             return bool(ctypes.windll.user32.SetWindowDisplayAffinity(
                 self._hwnd(), WDA_EXCLUDEFROMCAPTURE))
         except Exception:
+            return False
+
+    def _configure_macos_window(self):
+        """Apply native transparency, click-through, and capture exclusion."""
+        try:
+            from AppKit import (
+                NSApplication,
+                NSColor,
+                NSFloatingWindowLevel,
+                NSWindowCollectionBehaviorCanJoinAllSpaces,
+                NSWindowCollectionBehaviorFullScreenAuxiliary,
+            )
+
+            app = NSApplication.sharedApplication()
+            windows = list(app.windows())
+            window = next(
+                (candidate for candidate in windows
+                 if str(candidate.title()) == self._window_title),
+                None,
+            )
+            if window is None and windows:
+                # Override-redirect Tk windows do not expose their title on
+                # every Tk/macOS combination. The overlay is the largest
+                # window owned by this short-lived Python application.
+                window = max(
+                    windows,
+                    key=lambda candidate: (
+                        candidate.frame().size.width
+                        * candidate.frame().size.height),
+                )
+            if window is None:
+                return False
+            window.setIgnoresMouseEvents_(True)
+            window.setOpaque_(False)
+            window.setBackgroundColor_(NSColor.clearColor())
+            window.setHasShadow_(False)
+            window.setLevel_(NSFloatingWindowLevel)
+            window.setCollectionBehavior_(
+                NSWindowCollectionBehaviorCanJoinAllSpaces
+                | NSWindowCollectionBehaviorFullScreenAuxiliary)
+            self._mac_window = window
+            self.capture_window_id = int(window.windowNumber())
+            return True
+        except Exception as error:
+            print("macOS overlay setup failed:", error)
             return False
 
     def _rounded_rect(self, x1, y1, x2, y2, radius=16, **options):
