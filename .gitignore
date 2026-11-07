@@ -1,0 +1,23 @@
+# Local Python environment and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Downloaded/generated runtime assets
+stockfish/
+templates/
+theme-*/
+*.part
+*.zip
+
+# Machine-specific settings and diagnostics
+config.json
+*.log
+*diagnostic*.png
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
