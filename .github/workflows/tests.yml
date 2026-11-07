@@ -21,6 +21,12 @@ jobs:
           cache: pip
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
+      - name: Install quality tools
+        run: python -m pip install ruff pip-audit
+      - name: Run static analysis
+        run: ruff check . --select E,F,I,SIM,RUF --exclude .venv,templates,stockfish,__pycache__
+      - name: Audit Python dependencies
+        run: pip-audit -r requirements.txt
       - name: Install Stockfish and piece templates
         run: python setup.py
       - name: Run unit tests

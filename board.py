@@ -267,10 +267,10 @@ def valid_placement(fen_part):
         black_king = position.king(chess.BLACK)
         if chess.square_distance(white_king, black_king) <= 1:
             return False
-        if (position.is_attacked_by(chess.BLACK, white_king)
-                and position.is_attacked_by(chess.WHITE, black_king)):
-            return False
-        return True
+        return not (
+            position.is_attacked_by(chess.BLACK, white_king)
+            and position.is_attacked_by(chess.WHITE, black_king)
+        )
     except Exception:
         return False
 

@@ -3,6 +3,7 @@
 Press F10 to calibrate, then the overlay shows Stockfish's best move
 as an arrow on top of the board whenever it's your turn.
 """
+import contextlib
 import ctypes
 import json
 import os
@@ -91,14 +92,17 @@ def load_cfg():
     cfg.setdefault("think_ms", 500)
     rect = cfg.get("rect")
     if (not isinstance(rect, list) or len(rect) != 4
-            or not all(isinstance(v, (int, float)) for v in rect)
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                       for v in rect)
             or rect[2] <= rect[0] or rect[3] <= rect[1]):
         cfg["rect"] = None
     else:
         # mss expects integral physical-pixel coordinates. JSON permits
         # floating-point values, so normalize valid hand-edited configs here
         # instead of failing repeatedly in the capture loop.
-        cfg["rect"] = [int(round(v)) for v in rect]
+        rounded = [round(v) for v in rect]
+        cfg["rect"] = calibrate.normalize_rect(
+            [(rounded[0], rounded[1]), (rounded[2], rounded[3])])
     if cfg["color"] not in ("white", "black"):
         cfg["color"] = "white"
     try:
@@ -152,15 +156,18 @@ class Assistant:
             except Exception as e:
                 print("UI callback error:", e)
         if self.running:
-            try:
+            with contextlib.suppress(Exception):
                 self.overlay.root.after(50, self.poll)
-            except Exception:
-                pass
 
     # ---------- capture / analyze loop (worker thread) ----------
     def tick(self):
         if self.paused:
             self.status("Paused — press F9 to resume")
+            return
+        if (sys.platform in ("win32", "darwin")
+                and not self.overlay.capture_excluded):
+            self.status(
+                "Overlay capture protection unavailable — restart ChessHelper")
             return
         rect = self.cfg.get("rect")
         if not rect:
@@ -355,7 +362,9 @@ class Assistant:
             if self.calibration_pending:
                 return
             self.calibration_pending = True
-            print("calibrating: click outer top-left and bottom-right edges of the board;")
+            print(
+                "calibrating: click outer top-left and bottom-right "
+                "edges of the board;")
             print("check the green grid, then press Enter to accept")
             self.post(self._do_calibrate)
         elif key_name == "f11":
@@ -414,7 +423,9 @@ class Assistant:
         self.overlay.root.after(50, self.poll)
         if not self.cfg.get("rect"):
             print("Board not calibrated. Opening calibration now.")
-            print("Click the two outer board corners, check the green grid, then save it.")
+            print(
+                "Click the two outer board corners, check the green grid, "
+                "then save it.")
             # A new user cannot receive an arrow until the app knows the exact
             # board bounds. Open calibration automatically instead of leaving
             # them at a status message that requires discovering F10 first.

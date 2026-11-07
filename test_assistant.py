@@ -10,14 +10,15 @@ import unittest.mock
 import chess
 
 import board as bm
-from main import Assistant
 import main
+from main import Assistant
 
 
 class FakeOverlay:
     def __init__(self):
         self.calls = []
         self.root = None
+        self.capture_excluded = True
 
     def clear(self):
         self.calls.append(("clear",))
@@ -194,6 +195,23 @@ def test_float_config_rect_is_normalized_for_screen_capture():
     assert cfg["rect"] == [100, 201, 900, 1001]
 
 
+def test_invalid_saved_calibration_is_discarded():
+    invalid_rects = (
+        [0, 0, 1, 1],
+        [0, 0, 800, 200],
+        [False, 0, 800, 800],
+        [900, 900, 100, 100],
+    )
+    for rect in invalid_rects:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.json")
+            with open(config, "w", encoding="utf-8") as f:
+                json.dump({"rect": rect}, f)
+            with unittest.mock.patch.object(main, "CONFIG", config):
+                cfg = main.load_cfg()
+        assert cfg["rect"] is None, rect
+
+
 def test_stockfish_environment_override_is_cross_platform():
     with tempfile.TemporaryDirectory() as tmp:
         executable = os.path.join(tmp, "stockfish-custom")
@@ -224,6 +242,19 @@ def test_macos_permission_check_uses_native_authorization_apis():
         assert main.macos_permissions_ready()
 
 
+def test_tick_stops_when_overlay_would_contaminate_capture():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    assistant.overlay.capture_excluded = False
+    assistant.cfg["rect"] = [100, 100, 900, 900]
+    with (unittest.mock.patch.object(main.sys, "platform", "win32"),
+          unittest.mock.patch.object(main.capture, "grab") as grab):
+        assistant.tick()
+    assert not grab.called
+    flush_ui(assistant)
+    assert "capture protection unavailable" in assistant.overlay.calls[-1][1]
+
+
 def load_tests(loader, tests, pattern):
     suite = unittest.TestSuite()
     for fn in (
@@ -235,9 +266,11 @@ def load_tests(loader, tests, pattern):
         test_midgame_attachment_does_not_invent_castling_rights,
         test_failed_analysis_remains_pending_and_can_retry_same_position,
         test_float_config_rect_is_normalized_for_screen_capture,
+        test_invalid_saved_calibration_is_discarded,
         test_stockfish_environment_override_is_cross_platform,
         test_macos_permission_check_is_noop_on_other_platforms,
         test_macos_permission_check_uses_native_authorization_apis,
+        test_tick_stops_when_overlay_would_contaminate_capture,
     ):
         suite.addTest(unittest.FunctionTestCase(fn))
     return suite
@@ -252,7 +285,9 @@ if __name__ == "__main__":
     test_midgame_attachment_does_not_invent_castling_rights()
     test_failed_analysis_remains_pending_and_can_retry_same_position()
     test_float_config_rect_is_normalized_for_screen_capture()
+    test_invalid_saved_calibration_is_discarded()
     test_stockfish_environment_override_is_cross_platform()
     test_macos_permission_check_is_noop_on_other_platforms()
     test_macos_permission_check_uses_native_authorization_apis()
+    test_tick_stops_when_overlay_would_contaminate_capture()
     print("assistant start-position arrow test: PASS")

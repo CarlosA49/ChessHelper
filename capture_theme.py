@@ -50,7 +50,8 @@ def capture_set(image, fen_part, orientation, output_dir):
     expected = {color + piece for color in "wb" for piece in bm.PIECES}
     missing = sorted(expected - written)
     if missing:
-        raise RuntimeError("reference position is missing templates: " + ", ".join(missing))
+        raise RuntimeError(
+            "reference position is missing templates: " + ", ".join(missing))
     return sorted(written)
 
 

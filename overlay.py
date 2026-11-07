@@ -1,4 +1,5 @@
 """Polished transparent, click-through, animated move overlay."""
+import contextlib
 import ctypes
 import math
 import os
@@ -89,10 +90,8 @@ class Overlay:
         if sys.platform == "win32":
             self.root.attributes("-transparentcolor", KEY)
         elif sys.platform == "darwin":
-            try:
+            with contextlib.suppress(tk.TclError):
                 self.root.attributes("-transparent", True)
-            except tk.TclError:
-                pass
         self.root.configure(bg=transparent_bg)
         self.canvas = tk.Canvas(
             self.root, bg=transparent_bg, highlightthickness=0, bd=0)
@@ -129,9 +128,16 @@ class Overlay:
             return False
         WDA_EXCLUDEFROMCAPTURE = 0x00000011
         try:
-            return bool(ctypes.windll.user32.SetWindowDisplayAffinity(
-                self._hwnd(), WDA_EXCLUDEFROMCAPTURE))
-        except Exception:
+            for _attempt in range(3):
+                self.root.update_idletasks()
+                if ctypes.windll.user32.SetWindowDisplayAffinity(
+                        self._hwnd(), WDA_EXCLUDEFROMCAPTURE):
+                    return True
+            error = ctypes.windll.kernel32.GetLastError()
+            print("Windows could not exclude the overlay from capture:", error)
+            return False
+        except (AttributeError, OSError) as error:
+            print("Windows overlay capture protection failed:", error)
             return False
 
     def _configure_macos_window(self):

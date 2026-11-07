@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -22,6 +23,19 @@ TEMPLATE_SETS = ["neo", "classic", "neon"]
 # Event/bot piece sets use opaque asset IDs instead of public theme names.
 ASSET_TEMPLATE_SETS = {"cyber_event": "nw662"}
 UA = {"User-Agent": "Mozilla/5.0 (ChessHelper setup)"}
+
+
+def valid_template(path):
+    """Return whether a downloaded image has the alpha channel we require."""
+    try:
+        import cv2
+    except ImportError:
+        return False
+    try:
+        image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        return image is not None and image.ndim == 3 and image.shape[2] == 4
+    except (OSError, cv2.error):
+        return False
 
 
 def fetch(url, dest):
@@ -92,7 +106,8 @@ def setup_stockfish():
             os.remove(zpath)
             print("[stockfish] ready:", exe)
             return True
-        except Exception as e:
+        except (OSError, RuntimeError, urllib.error.URLError,
+                zipfile.BadZipFile) as e:
             print("[stockfish] failed:", e)
     print("[stockfish] automatic download failed. Download it manually from")
     print("  https://stockfishchess.org/download/")
@@ -102,6 +117,7 @@ def setup_stockfish():
 
 def setup_templates():
     os.makedirs(TEMPLATES_DIR, exist_ok=True)
+    complete_sets = 0
     for set_name in TEMPLATE_SETS:
         sdir = os.path.join(TEMPLATES_DIR, set_name)
         os.makedirs(sdir, exist_ok=True)
@@ -109,22 +125,22 @@ def setup_templates():
         for color in "wb":
             for p in "pnbrqk":
                 fp = os.path.join(sdir, f"{color}{p}.png")
+                if os.path.isfile(fp) and valid_template(fp):
+                    continue
                 if os.path.isfile(fp):
-                    try:
-                        import cv2
-                        if cv2.imread(fp, cv2.IMREAD_UNCHANGED) is not None:
-                            continue
-                    except Exception:
-                        pass
                     os.remove(fp)
                 url = (f"https://www.chess.com/chess-themes/pieces/"
                        f"{set_name}/150/{color}{p}.png")
                 try:
                     fetch(url, fp)
-                except Exception as e:
+                    if not valid_template(fp):
+                        os.remove(fp)
+                        raise RuntimeError("downloaded image is not a valid RGBA PNG")
+                except (OSError, RuntimeError, urllib.error.URLError) as e:
                     print(f"[templates] {set_name}/{color}{p} failed: {e}")
                     ok = False
         print(f"[templates] set '{set_name}': {'ok' if ok else 'incomplete'}")
+        complete_sets += int(ok)
     for set_name, asset_id in ASSET_TEMPLATE_SETS.items():
         sdir = os.path.join(TEMPLATES_DIR, set_name)
         os.makedirs(sdir, exist_ok=True)
@@ -132,28 +148,31 @@ def setup_templates():
         for color in "wb":
             for p in "pnbrqk":
                 fp = os.path.join(sdir, f"{color}{p}.png")
+                if os.path.isfile(fp) and valid_template(fp):
+                    continue
                 if os.path.isfile(fp):
-                    try:
-                        import cv2
-                        if cv2.imread(fp, cv2.IMREAD_UNCHANGED) is not None:
-                            continue
-                    except Exception:
-                        pass
                     os.remove(fp)
                 url = (f"https://assets-themes.chess.com/image/"
                        f"{asset_id}/150/{color}{p}.png")
                 try:
                     fetch(url, fp)
-                except Exception as e:
+                    if not valid_template(fp):
+                        os.remove(fp)
+                        raise RuntimeError("downloaded image is not a valid RGBA PNG")
+                except (OSError, RuntimeError, urllib.error.URLError) as e:
                     print(f"[templates] {set_name}/{color}{p} failed: {e}")
                     ok = False
         print(f"[templates] set '{set_name}': {'ok' if ok else 'incomplete'}")
+        complete_sets += int(ok)
+    return complete_sets > 0
 
 
 def main():
     ok_sf = setup_stockfish()
-    setup_templates()
-    if not ok_sf:
+    ok_templates = setup_templates()
+    if not ok_templates:
+        print("[templates] no complete piece set is available")
+    if not ok_sf or not ok_templates:
         sys.exit(1)
     print("setup complete.")
 

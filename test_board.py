@@ -6,10 +6,9 @@ import numpy as np
 
 import board as bm
 import capture
-from test_assistant import test_start_position_queues_white_move_arrow
 from calibrate import grid_lines, normalize_rect, window_geometry
 from overlay import move_label_position, screen_to_local
-
+from test_assistant import test_start_position_queues_white_move_arrow
 
 START = chess.STARTING_FEN.split(" ")[0]
 
@@ -99,7 +98,7 @@ class CalibrationTests(unittest.TestCase):
 
     def test_move_label_uses_side_when_board_touches_top(self):
         board = [100, 0, 740, 640]
-        x, y = move_label_position((700, 40), board, (0, 0), (1920, 1080))
+        x, _y = move_label_position((700, 40), board, (0, 0), (1920, 1080))
         self.assertGreater(x - 76, board[2])
 
 

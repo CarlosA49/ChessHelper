@@ -61,7 +61,7 @@ def run(timeout_s=None, parent=None):
     screen_pts = []
     result = {"rect": None}
     state = {"preview": False}
-    width, height = mon["width"], mon["height"]
+    width = mon["width"]
     message = canvas.create_text(
         width // 2, 45, fill="#ffffff", font=("Segoe UI", 18, "bold"),
         width=max(300, width - 120), justify="center",
