@@ -70,8 +70,11 @@ def run(timeout_s=None, parent=None):
     save_button = None
 
     def clear_preview():
+        nonlocal save_button
         canvas.delete("preview")
         canvas.delete("point")
+        canvas.delete("save")
+        save_button = None
 
     def cancel(_event=None):
         result["rect"] = None
@@ -158,9 +161,11 @@ def run(timeout_s=None, parent=None):
 
     canvas.bind("<Button-1>", click)
     canvas.bind("<Button-3>", cancel)
-    root.bind_all("<Escape>", cancel)
-    root.bind_all("<Return>", accept)
-    root.bind_all("<BackSpace>", restart)
+    # Limit bindings to this window; bind_all() survives in the shared Tk
+    # interpreter and can fire stale calibration callbacks after it closes.
+    root.bind("<Escape>", cancel)
+    root.bind("<Return>", accept)
+    root.bind("<BackSpace>", restart)
     root.focus_force()
     if timeout_s:
         root.after(int(timeout_s * 1000), cancel)

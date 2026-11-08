@@ -4,6 +4,14 @@ Real-time move assistant for chess.com/play. Captures the board off the screen,
 finds the best move with Stockfish, and draws an arrow over your board showing
 where to move.
 
+## Private release packages
+
+The repository's private **Releases** page provides standalone Windows x64,
+macOS Apple Silicon, and macOS Intel packages. Extract the ZIP before running.
+On macOS, right-click `ChessHelper.app` and choose **Open** on first launch if
+Gatekeeper asks for confirmation. Packaged settings are stored in the user's
+application-data directory rather than inside the application bundle.
+
 ## Install on Windows
 
 1. `python -m venv .venv`
@@ -44,13 +52,21 @@ again. Apple Silicon and Intel Homebrew paths are both detected automatically.
 
 | Key  | Action                        |
 |------|-------------------------------|
+| F7   | hide / show the on-screen control guide |
 | F9   | pause / resume                |
 | F10  | calibrate board               |
-| F11  | switch your color (white/black) |
+| Ctrl+Alt+B | manually switch color on Windows/Linux |
+| Ctrl+Alt+A | restore automatic color detection on Windows/Linux |
+| Cmd+Option+B | manually switch color on macOS |
+| Cmd+Option+A | restore automatic color detection on macOS |
 | F8   | quit                          |
 
+The overlay displays this guide in the upper-right corner together with the
+current side and `AUTO` or `MANUAL` orientation mode.
+
 On a Mac keyboard configured to use media controls, hold `fn` while pressing
-the function-key shortcuts.
+the function-key shortcuts. The on-screen guide automatically shows the native
+Mac `Cmd+Option` combinations.
 
 ## How it works
 
@@ -59,14 +75,17 @@ the function-key shortcuts.
   with OpenCV template matching.
 - The position becomes a FEN; move detection keeps legal game history so
   castling rights, en passant, and turn order survive across screenshots.
-- Board orientation and move notation are normalized for both White and Black.
+- Board orientation and your side are detected automatically at the start of
+  each game. Move notation is normalized for both White and Black.
 - Stockfish searches for your side; the best move is drawn on a transparent,
   click-through overlay. You move the piece yourself.
 
 ## Notes
 
-- Keep the browser window in place after calibrating; press F10 again if it
-  moves or resizes.
+- Calibration is saved across games. Keep the browser window in place; press
+  F10 only if automatic relocation cannot recover after the board moves or
+  resizes. Menus, animations, and result dialogs are retried automatically and
+  do not require recalibration.
 - Keep the entire board visible and uncovered. ChessHelper reads visible screen
   pixels, so another window over the board prevents recognition.
 - Restart `start.bat` after updating the project so the new calibration window

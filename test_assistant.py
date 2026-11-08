@@ -8,6 +8,7 @@ import unittest
 import unittest.mock
 
 import chess
+import numpy as np
 
 import board as bm
 import main
@@ -26,8 +27,17 @@ class FakeOverlay:
     def show_status(self, text):
         self.calls.append(("status", text))
 
+    def show_controls(self, color, automatic):
+        self.calls.append(("controls", color, automatic))
+
+    def toggle_controls(self):
+        self.calls.append(("toggle_controls",))
+
     def show_arrow(self, x1, y1, x2, y2, label):
         self.calls.append(("arrow", x1, y1, x2, y2, label))
+
+    def set_board_rect(self, rect):
+        self.calls.append(("board_rect", rect))
 
 
 class FakeEngine:
@@ -212,6 +222,28 @@ def test_invalid_saved_calibration_is_discarded():
         assert cfg["rect"] is None, rect
 
 
+def test_config_save_is_atomic_and_leaves_no_temporary_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        config = os.path.join(tmp, "config.json")
+        with unittest.mock.patch.object(main, "CONFIG", config):
+            main.save_cfg({"color": "black", "auto_color": True})
+        with open(config, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        assert saved["color"] == "black"
+        assert not os.path.exists(config + ".tmp")
+
+
+def test_packaged_apps_use_writable_platform_config_directories():
+    assert main.default_config_path(
+        "win32", frozen=True, environ={"APPDATA": "C:\\Data"},
+        home="C:\\Users\\test") == os.path.join(
+            "C:\\Data", "ChessHelper", "config.json")
+    assert main.default_config_path(
+        "darwin", frozen=True, environ={}, home="/Users/test") == os.path.join(
+            "/Users/test", "Library", "Application Support",
+            "ChessHelper", "config.json")
+
+
 def test_stockfish_environment_override_is_cross_platform():
     with tempfile.TemporaryDirectory() as tmp:
         executable = os.path.join(tmp, "stockfish-custom")
@@ -225,6 +257,15 @@ def test_stockfish_environment_override_is_cross_platform():
 def test_macos_permission_check_is_noop_on_other_platforms():
     with unittest.mock.patch.object(main.sys, "platform", "win32"):
         assert main.macos_permissions_ready()
+
+
+def test_side_shortcuts_are_native_on_windows_and_macos():
+    assert main.side_shortcuts("win32") == (
+        "<ctrl>+<alt>+b", "<ctrl>+<alt>+a",
+        "Ctrl+Alt+B", "Ctrl+Alt+A")
+    assert main.side_shortcuts("darwin") == (
+        "<cmd>+<alt>+b", "<cmd>+<alt>+a",
+        "Cmd+Option+B", "Cmd+Option+A")
 
 
 def test_macos_permission_check_uses_native_authorization_apis():
@@ -255,6 +296,96 @@ def test_tick_stops_when_overlay_would_contaminate_capture():
     assert "capture protection unavailable" in assistant.overlay.calls[-1][1]
 
 
+def test_status_recovers_after_transient_unreadable_frame():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    assistant.waiting_for = "our_move"
+    assistant.last_move_status = "Suggested move: e4 — follow the arrow"
+    assistant.last_status = "Checking board — retrying automatically…"
+
+    assistant._restore_status()
+    flush_ui(assistant)
+
+    assert assistant.overlay.calls[-1] == (
+        "status", "Suggested move: e4 — follow the arrow")
+
+
+def test_browser_safe_color_hotkey_disables_auto_detection():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    assistant.cfg["color"] = "white"
+    assistant.cfg["auto_color"] = True
+    with unittest.mock.patch.object(main, "save_cfg"):
+        assistant.on_hotkey("switch_color")
+    assert assistant.cfg["color"] == "black"
+    assert assistant.cfg["auto_color"] is False
+
+    flush_ui(assistant)
+    assert ("controls", "black", False) in assistant.overlay.calls
+
+
+def test_invalid_frame_breaks_stability_without_replacing_reference():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    assistant.templates = [{}]
+    assistant.cfg["rect"] = [0, 0, 800, 800]
+    assistant.cfg["auto_color"] = False
+    assistant.stable_fen = chess.STARTING_FEN.split(" ")[0]
+    assistant.stable_count = 2
+    reference = np.ones((8, 8, 3), dtype=np.uint8)
+    assistant.last_board_image = reference
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    with (unittest.mock.patch.object(main.capture, "grab", return_value=image),
+          unittest.mock.patch.object(main.bm, "grid_cells", return_value=[]),
+          unittest.mock.patch.object(main.bm, "classify_grid", return_value=[]),
+          unittest.mock.patch.object(main.bm, "cells_to_fen", return_value="bad"),
+          unittest.mock.patch.object(main.bm, "valid_placement", return_value=False)):
+        assistant.tick()
+
+    assert assistant.stable_count == 0
+    assert assistant.last_board_image is reference
+
+
+def test_relocation_recalculates_arrow_for_new_coordinates():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    assistant.engine = FakeEngine()
+    assistant.templates = [{}]
+    assistant.cfg["rect"] = [0, 0, 800, 800]
+    assistant.cfg["color"] = "white"
+    assistant.cfg["auto_color"] = True
+    assistant.position = chess.Board()
+    assistant.prev_fen = assistant.position.board_fen()
+    assistant.waiting_for = "our_move"
+    assistant.pending_move = chess.Move.from_uci("e2e4")
+    assistant.last_board_image = np.zeros((800, 800, 3), dtype=np.uint8)
+    candidate = [100, 100, 1000, 1000]
+    image = np.zeros((900, 900, 3), dtype=np.uint8)
+
+    with (unittest.mock.patch.object(
+              main.capture, "grab_virtual_screen",
+              return_value=(image, [0, 0, 1200, 1200])),
+          unittest.mock.patch.object(
+              main.capture, "find_relocated_rect", return_value=candidate),
+          unittest.mock.patch.object(main.capture, "grab", return_value=image),
+          unittest.mock.patch.object(main.bm, "grid_cells", return_value=[]),
+          unittest.mock.patch.object(main.bm, "classify_grid", return_value=[]),
+          unittest.mock.patch.object(
+              main.bm, "detect_orientation",
+              return_value=("white", assistant.prev_fen)),
+          unittest.mock.patch.object(main.bm, "valid_placement", return_value=True),
+          unittest.mock.patch.object(main, "save_cfg")):
+        assistant._try_relocate_board()
+
+    assert assistant.cfg["rect"] == candidate
+    assert assistant.waiting_for == "analysis"
+    assert assistant.pending_move is None
+    flush_ui(assistant)
+    assert ("clear",) in assistant.overlay.calls
+    assert ("board_rect", candidate) in assistant.overlay.calls
+
+
 def load_tests(loader, tests, pattern):
     suite = unittest.TestSuite()
     for fn in (
@@ -267,10 +398,17 @@ def load_tests(loader, tests, pattern):
         test_failed_analysis_remains_pending_and_can_retry_same_position,
         test_float_config_rect_is_normalized_for_screen_capture,
         test_invalid_saved_calibration_is_discarded,
+        test_config_save_is_atomic_and_leaves_no_temporary_file,
+        test_packaged_apps_use_writable_platform_config_directories,
         test_stockfish_environment_override_is_cross_platform,
         test_macos_permission_check_is_noop_on_other_platforms,
+        test_side_shortcuts_are_native_on_windows_and_macos,
         test_macos_permission_check_uses_native_authorization_apis,
         test_tick_stops_when_overlay_would_contaminate_capture,
+        test_status_recovers_after_transient_unreadable_frame,
+        test_browser_safe_color_hotkey_disables_auto_detection,
+        test_invalid_frame_breaks_stability_without_replacing_reference,
+        test_relocation_recalculates_arrow_for_new_coordinates,
     ):
         suite.addTest(unittest.FunctionTestCase(fn))
     return suite

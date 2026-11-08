@@ -1,6 +1,7 @@
 """Fast screen capture of the calibrated board rectangle."""
 import sys
 
+import cv2
 import mss
 import numpy as np
 
@@ -55,3 +56,58 @@ def grab(rect):
         shot = sct.grab(mon)
         img = np.asarray(shot)
         return img[:, :, :3].copy()  # BGRA -> BGR
+
+
+def grab_virtual_screen():
+    """Capture the whole virtual desktop and return ``(image, rect)``."""
+    with mss.mss() as sct:
+        mon = sct.monitors[0]
+        rect = [mon["left"], mon["top"],
+                mon["left"] + mon["width"], mon["top"] + mon["height"]]
+    return grab(rect), rect
+
+
+def find_relocated_rect(reference, desktop, desktop_rect,
+                        min_score=0.58):
+    """Find a moved/resized board using its last valid captured image.
+
+    Matching is performed on blurred, downscaled images so changing pieces do
+    not outweigh the board's persistent square/color structure.
+    """
+    if reference is None or desktop is None:
+        return None
+    rh, rw = reference.shape[:2]
+    dh, dw = desktop.shape[:2]
+    if min(rh, rw) < 160 or min(dh, dw) < 160:
+        return None
+
+    downscale = min(1.0, 1200.0 / dw)
+    screen = cv2.resize(
+        desktop, None, fx=downscale, fy=downscale,
+        interpolation=cv2.INTER_AREA)
+    screen = cv2.GaussianBlur(
+        cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY), (9, 9), 0)
+    best = None
+    for scale in (0.75, 0.875, 1.0, 1.125, 1.25):
+        width = round(rw * scale * downscale)
+        height = round(rh * scale * downscale)
+        if width < 80 or height < 80:
+            continue
+        if width > screen.shape[1] or height > screen.shape[0]:
+            continue
+        template = cv2.resize(
+            reference, (width, height), interpolation=cv2.INTER_AREA)
+        template = cv2.GaussianBlur(
+            cv2.cvtColor(template, cv2.COLOR_BGR2GRAY), (9, 9), 0)
+        result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
+        _minimum, score, _min_at, location = cv2.minMaxLoc(result)
+        if best is None or score > best[0]:
+            best = (score, location, width, height)
+    if best is None or best[0] < min_score:
+        return None
+    _score, (x, y), width, height = best
+    left = desktop_rect[0] + round(x / downscale)
+    top = desktop_rect[1] + round(y / downscale)
+    right = desktop_rect[0] + round((x + width) / downscale)
+    bottom = desktop_rect[1] + round((y + height) / downscale)
+    return [left, top, right, bottom]

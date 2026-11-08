@@ -1,0 +1,117 @@
+name: Build private release packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Private release tag
+        required: true
+        default: v1.0.0
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64 package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install build dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Download runtime assets
+        run: python setup.py
+      - name: Run tests
+        run: python -m unittest discover -q
+      - name: Build application
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name ChessHelper `
+            --add-data "templates;templates" `
+            --add-binary "stockfish/stockfish.exe;stockfish" `
+            --collect-all pynput main.py
+          Compress-Archive -Path dist/ChessHelper `
+            -DestinationPath ChessHelper-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChessHelper-Windows-x64
+          path: ChessHelper-Windows-x64.zip
+          if-no-files-found: error
+
+  mac:
+    name: macOS ${{ matrix.arch }} package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install build dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Download runtime assets
+        run: |
+          brew install stockfish || brew upgrade stockfish || true
+          python setup.py
+          mkdir -p stockfish
+          cp "$(command -v stockfish)" stockfish/stockfish
+          chmod +x stockfish/stockfish
+      - name: Run tests
+        run: python -m unittest discover -q
+      - name: Build and ad-hoc sign application
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name ChessHelper \
+            --add-data "templates:templates" \
+            --add-binary "stockfish/stockfish:stockfish" \
+            --collect-all pynput \
+            --hidden-import AppKit \
+            --hidden-import Quartz \
+            --hidden-import ApplicationServices main.py
+          codesign --force --deep --sign - dist/ChessHelper.app
+          codesign --verify --deep --strict dist/ChessHelper.app
+          ditto -c -k --sequesterRsrc --keepParent dist/ChessHelper.app \
+            "ChessHelper-macOS-${{ matrix.arch }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChessHelper-macOS-${{ matrix.arch }}
+          path: ChessHelper-macOS-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish private release
+    needs: [windows, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ChessHelper-*
+          path: packages
+          merge-multiple: true
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" packages/*.zip --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" packages/*.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "ChessHelper $TAG" \
+              --notes "Private Windows and macOS application packages."
+          fi

@@ -22,10 +22,45 @@ import capture
 import engine as eng
 import overlay as ovl
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-CONFIG = os.path.join(BASE, "config.json")
+SOURCE_BASE = os.path.dirname(os.path.abspath(__file__))
+BASE = getattr(sys, "_MEIPASS", SOURCE_BASE)
+
+
+def default_config_path(platform=None, frozen=None, environ=None, home=None):
+    """Return a writable config path for source and packaged applications."""
+    platform = platform or sys.platform
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    if not frozen:
+        return os.path.join(SOURCE_BASE, "config.json")
+    environ = os.environ if environ is None else environ
+    home = os.path.expanduser("~") if home is None else home
+    if platform == "darwin":
+        root = os.path.join(home, "Library", "Application Support")
+    elif platform == "win32":
+        root = environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+    else:
+        root = environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return os.path.join(root, "ChessHelper", "config.json")
+
+
+CONFIG = os.environ.get("CHESSHELPER_CONFIG", default_config_path())
 LOCAL_STOCKFISH = os.path.join(
     BASE, "stockfish", "stockfish.exe" if sys.platform == "win32" else "stockfish")
+CONFIG_LOCK = threading.Lock()
+
+
+def side_shortcuts(platform=None):
+    """Return native side-control hotkeys and their display labels."""
+    platform = platform or sys.platform
+    if platform == "darwin":
+        return (
+            "<cmd>+<alt>+b", "<cmd>+<alt>+a",
+            "Cmd+Option+B", "Cmd+Option+A",
+        )
+    return (
+        "<ctrl>+<alt>+b", "<ctrl>+<alt>+a",
+        "Ctrl+Alt+B", "Ctrl+Alt+A",
+    )
 
 if sys.platform == "win32":
     try:
@@ -89,6 +124,7 @@ def load_cfg():
         cfg = {}
     cfg.setdefault("rect", None)
     cfg.setdefault("color", "white")
+    cfg.setdefault("auto_color", True)
     cfg.setdefault("think_ms", 500)
     rect = cfg.get("rect")
     if (not isinstance(rect, list) or len(rect) != 4
@@ -105,6 +141,8 @@ def load_cfg():
             [(rounded[0], rounded[1]), (rounded[2], rounded[3])])
     if cfg["color"] not in ("white", "black"):
         cfg["color"] = "white"
+    if not isinstance(cfg["auto_color"], bool):
+        cfg["auto_color"] = True
     try:
         cfg["think_ms"] = max(100, min(10000, int(cfg["think_ms"])))
     except (TypeError, ValueError):
@@ -113,8 +151,15 @@ def load_cfg():
 
 
 def save_cfg(cfg):
-    with open(CONFIG, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+    """Atomically persist configuration without exposing partial JSON."""
+    temporary = CONFIG + ".tmp"
+    with CONFIG_LOCK:
+        os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, CONFIG)
 
 
 class Assistant:
@@ -134,6 +179,12 @@ class Assistant:
         self.waiting_for = None
         self.stable_fen = None
         self.stable_count = 0
+        self.invalid_count = 0
+        self.rejected_fen = None
+        self.rejected_count = 0
+        self.last_move_status = None
+        self.last_board_image = None
+        self.last_relocation_attempt = 0.0
         self.last_status = None
 
     # ---------- overlay plumbing (main thread) ----------
@@ -183,12 +234,26 @@ class Assistant:
         img = capture.grab(rect)
         cells = bm.grid_cells(img)
         grid = bm.classify_grid(cells, self.templates)
-        fen_part = bm.cells_to_fen(grid, self.cfg["color"])
+        detected_orientation = self.cfg["color"]
+        if self.cfg["auto_color"] and self.position is None:
+            detected_orientation, fen_part = bm.detect_orientation(
+                grid, self.cfg["color"])
+        else:
+            fen_part = bm.cells_to_fen(grid, self.cfg["color"])
         if not bm.valid_placement(fen_part):
-            self.stable_fen = None
+            self.invalid_count += 1
             self.stable_count = 0
-            self.status("Board not recognized — recalibrate to the outer square edges")
+            if self.invalid_count == 4:
+                self.status("Checking board — retrying automatically…")
+            elif self.invalid_count == 40:
+                self.status(
+                    "Board still unreadable — keep it visible; "
+                    "press F10 only if it moved")
+            if (self.invalid_count >= 20 and self.last_board_image is not None
+                    and time.monotonic() - self.last_relocation_attempt >= 15):
+                self._try_relocate_board()
             return
+        self.invalid_count = 0
         if fen_part == self.stable_fen:
             self.stable_count += 1
         else:
@@ -197,13 +262,66 @@ class Assistant:
             self.status("Board detected — stabilizing position…")
             return
         # Reject brief drag/animation frames without adding much latency.
-        if self.stable_count < 3:
+        if self.stable_count < 2:
             return
+        # Relocation must use a position that survived stabilization, not a
+        # single legal-looking animation frame.
+        self.last_board_image = img
+        if (self.cfg["auto_color"] and self.position is None
+                and detected_orientation != self.cfg["color"]):
+            self.cfg["color"] = detected_orientation
+            save_cfg(self.cfg)
+            self._refresh_controls()
+            print("board orientation detected:", detected_orientation)
         if fen_part == self.prev_fen:
             if self.waiting_for == "analysis" and self.position is not None:
                 self._suggest_move(self.cfg["color"][0])
+            else:
+                self._restore_status()
             return
         self.on_new_position(fen_part)
+
+    def _try_relocate_board(self):
+        """Search the desktop for a moved board and verify before adopting it."""
+        self.last_relocation_attempt = time.monotonic()
+        self.status("Board moved — searching for it automatically…")
+        try:
+            desktop, desktop_rect = capture.grab_virtual_screen()
+            candidate = capture.find_relocated_rect(
+                self.last_board_image, desktop, desktop_rect)
+            if not candidate or candidate == self.cfg.get("rect"):
+                return
+            candidate_img = capture.grab(candidate)
+            candidate_grid = bm.classify_grid(
+                bm.grid_cells(candidate_img), self.templates)
+            orientation, fen_part = bm.detect_orientation(
+                candidate_grid, self.cfg["color"])
+            if not bm.valid_placement(fen_part):
+                return
+            self.cfg["rect"] = candidate
+            color_changed = False
+            if self.cfg["auto_color"]:
+                color_changed = self.cfg["color"] != orientation
+                self.cfg["color"] = orientation
+            save_cfg(self.cfg)
+            if color_changed:
+                self._refresh_controls()
+            self.last_board_image = candidate_img
+            self.invalid_count = 0
+            self.stable_fen = None
+            self.stable_count = 0
+            if self.waiting_for == "our_move":
+                # The existing arrow uses the old pixel rectangle. Request a
+                # fresh analysis so it is redrawn against the relocated board.
+                self.waiting_for = "analysis"
+                self.pending_move = None
+                self.last_move_status = None
+                self.post(self.overlay.clear)
+            self.post(lambda rect=candidate: self.overlay.set_board_rect(rect))
+            self.status("Board found and aligned automatically — reading position…")
+            print("board relocated automatically:", candidate)
+        except Exception as error:
+            print("automatic board relocation failed:", error)
 
     def on_new_position(self, fen_part):
         """Accept only legal turn-by-turn changes before replacing an arrow."""
@@ -235,6 +353,7 @@ class Assistant:
                 self.pending_move = None
                 self.post(self.overlay.clear)
                 self.status("Move confirmed — waiting for opponent")
+                self._clear_rejected_position()
                 return
             moves = bm.find_two_moves(self.position, target)
             if moves is not None:
@@ -242,6 +361,7 @@ class Assistant:
                 self.position.push(moves[0])
                 self.position.push(moves[1])
                 self.prev_fen = fen_part
+                self._clear_rejected_position()
                 self._suggest_move(me)
                 return
 
@@ -250,15 +370,40 @@ class Assistant:
             if move is not None:
                 self.position.push(move)
                 self.prev_fen = fen_part
+                self._clear_rejected_position()
                 self._suggest_move(me)
                 return
 
-        # A completed game followed by a fresh board is not a legal one-move
-        # transition. Resynchronize instead of ignoring the new game forever.
+        if fen_part == self.rejected_fen:
+            self.rejected_count += 1
+        else:
+            self.rejected_fen = fen_part
+            self.rejected_count = 1
+
+        # A new game can already have its first move on screen, so exact start
+        # position matching alone is insufficient after fast rematches.
         if fen_part == start and self.prev_fen != start:
             self._reset_position_tracking()
+            self.post(self.overlay.clear)
             self.on_new_position(fen_part)
-        # Otherwise this is animation or recognition noise; keep the arrow.
+            return
+        old_count = len(self.position.piece_map())
+        new_count = len(target)
+        definitely_new = (
+            self.position.is_game_over(claim_draw=False)
+            or (new_count >= 20 and new_count >= old_count + 4)
+        )
+        if definitely_new and self.rejected_count >= 3:
+            self._reset_position_tracking()
+            self.post(self.overlay.clear)
+            self.stable_fen = None
+            self.stable_count = 0
+            self.status("New game detected — reading board and side automatically…")
+            return
+        # Keep the existing arrow during recognition noise, but do not leave
+        # the status stuck on "stabilizing" indefinitely.
+        if self.rejected_count >= 3:
+            self.status("Checking board — retrying automatically…")
 
     def _suggest_move(self, me):
         self.waiting_for = "analysis"
@@ -291,14 +436,30 @@ class Assistant:
                   self.overlay.show_arrow(x1, y1, x2, y2, label))
         self.pending_move = mv
         self.waiting_for = "our_move"
+        self.last_move_status = f"Suggested move: {san} — follow the arrow"
         self.last_status = "move:" + best
-        self.status(f"Suggested move: {san} — follow the arrow")
+        self.status(self.last_move_status)
+
+    def _restore_status(self):
+        """Restore useful state text after temporary capture noise."""
+        if self.waiting_for == "our_move":
+            self.status(self.last_move_status or "Move ready — follow the arrow")
+        elif self.waiting_for == "opponent":
+            self.status("Position read — waiting for opponent")
+        elif self.waiting_for == "analysis":
+            self.status("Your turn — Stockfish is calculating…")
+
+    def _clear_rejected_position(self):
+        self.rejected_fen = None
+        self.rejected_count = 0
 
     def _reset_position_tracking(self):
         self.prev_fen = None
         self.position = None
         self.pending_move = None
         self.waiting_for = None
+        self.last_move_status = None
+        self._clear_rejected_position()
 
     def loop(self):
         while self.running:
@@ -338,12 +499,12 @@ class Assistant:
             self.cfg["rect"] = rect
             save_cfg(self.cfg)
             self.overlay.set_board_rect(rect)
-            self.prev_fen = None
-            self.position = None
+            self._reset_position_tracking()
             self.stable_fen = None
             self.stable_count = 0
-            self.pending_move = None
-            self.waiting_for = None
+            self.invalid_count = 0
+            self.last_board_image = None
+            self.last_relocation_attempt = 0.0
             self.post(self.overlay.clear)
             print("calibration saved:", rect)
             self.last_status = None
@@ -353,8 +514,16 @@ class Assistant:
             self.status("Calibration cancelled — press F10 to retry")
 
     # ---------- hotkeys ----------
+    def _refresh_controls(self):
+        if self.overlay:
+            color = self.cfg["color"]
+            automatic = self.cfg["auto_color"]
+            self.post(lambda: self.overlay.show_controls(color, automatic))
+
     def on_hotkey(self, key_name):
-        if key_name == "f9":
+        if key_name == "f7":
+            self.post(self.overlay.toggle_controls)
+        elif key_name == "f9":
             self.paused = not self.paused
             print("assistant:", "paused" if self.paused else "running")
             self.last_status = None
@@ -367,17 +536,31 @@ class Assistant:
                 "edges of the board;")
             print("check the green grid, then press Enter to accept")
             self.post(self._do_calibrate)
-        elif key_name == "f11":
+        elif key_name == "switch_color":
+            self.cfg["auto_color"] = False
             self.cfg["color"] = "black" if self.cfg["color"] == "white" else "white"
             save_cfg(self.cfg)
-            self.prev_fen = None
-            self.position = None
+            self._reset_position_tracking()
             self.stable_fen = None
             self.stable_count = 0
-            self.pending_move = None
-            self.waiting_for = None
+            self.invalid_count = 0
             self.post(self.overlay.clear)
+            self._refresh_controls()
             print("playing as:", self.cfg["color"])
+            self.last_status = None
+            self.status(
+                f"Playing as {self.cfg['color']} — manual side override enabled")
+        elif key_name == "auto_color":
+            self.cfg["auto_color"] = True
+            save_cfg(self.cfg)
+            self._reset_position_tracking()
+            self.stable_fen = None
+            self.stable_count = 0
+            self.invalid_count = 0
+            self.post(self.overlay.clear)
+            self._refresh_controls()
+            self.last_status = None
+            self.status("Automatic side detection enabled — reading board…")
         elif key_name == "f8":
             self.shutdown()
 
@@ -385,11 +568,14 @@ class Assistant:
         def handler(name):
             return lambda: self.on_hotkey(name)
 
+        switch_key, auto_key, _switch_label, _auto_label = side_shortcuts()
         with keyboard.GlobalHotKeys({
+            "<f7>": handler("f7"),
             "<f8>": handler("f8"),
             "<f9>": handler("f9"),
             "<f10>": handler("f10"),
-            "<f11>": handler("f11"),
+            switch_key: handler("switch_color"),
+            auto_key: handler("auto_color"),
         }) as h:
             h.join()
 
@@ -403,6 +589,8 @@ class Assistant:
         self.overlay = ovl.Overlay()
         capture.set_excluded_window(self.overlay.capture_window_id)
         self.overlay.set_board_rect(self.cfg.get("rect"))
+        self.overlay.show_controls(
+            self.cfg["color"], self.cfg["auto_color"])
         if not self.templates:
             print("Piece templates missing or incomplete.")
             print("Run: .venv\\Scripts\\python setup.py")
@@ -431,7 +619,9 @@ class Assistant:
             # them at a status message that requires discovering F10 first.
             self.calibration_pending = True
             self.overlay.root.after(400, self._do_calibrate)
-        print("hotkeys: F9 pause | F10 calibrate | F11 switch color | F8 quit")
+        _switch_key, _auto_key, switch_label, auto_label = side_shortcuts()
+        print("hotkeys: F7 controls | F9 pause | F10 calibrate | "
+              f"{switch_label} switch color | {auto_label} auto color | F8 quit")
         try:
             self.overlay.root.mainloop()
         finally:

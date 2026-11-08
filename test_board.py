@@ -2,12 +2,13 @@
 import unittest
 
 import chess
+import cv2
 import numpy as np
 
 import board as bm
 import capture
 from calibrate import grid_lines, normalize_rect, window_geometry
-from overlay import move_label_position, screen_to_local
+from overlay import control_rows, move_label_position, screen_to_local
 from test_assistant import test_start_position_queues_white_move_arrow
 
 START = chess.STARTING_FEN.split(" ")[0]
@@ -43,6 +44,22 @@ class OrientationTests(unittest.TestCase):
         self.assertEqual(bm.square_center(chess.H1, rect, "black"), (150, 250))
         self.assertEqual(bm.square_center(chess.A8, rect, "black"), (850, 950))
 
+    def test_orientation_is_detected_from_either_screen_direction(self):
+        for actual in ("white", "black"):
+            with self.subTest(actual=actual):
+                grid = screen_grid_from_fen(START, actual)
+                detected, fen = bm.detect_orientation(grid)
+                self.assertEqual(detected, actual)
+                self.assertEqual(fen, START)
+
+    def test_sparse_endgame_keeps_preferred_orientation(self):
+        sparse = "8/8/2k5/8/8/5K2/8/8"
+        grid = screen_grid_from_fen(sparse, "white")
+        for preferred in ("white", "black"):
+            with self.subTest(preferred=preferred):
+                detected, _fen = bm.detect_orientation(grid, preferred)
+                self.assertEqual(detected, preferred)
+
     def test_every_move_endpoint_stays_inside_calibrated_board(self):
         rect = [100, 200, 900, 1000]
         for color in ("white", "black"):
@@ -56,6 +73,12 @@ class OrientationTests(unittest.TestCase):
 
 
 class CalibrationTests(unittest.TestCase):
+    def test_control_guide_uses_native_mac_labels(self):
+        keys = [key for key, _action in control_rows("darwin")]
+        self.assertIn("Cmd+Option+B", keys)
+        self.assertIn("Cmd+Option+A", keys)
+        self.assertNotIn("Ctrl+Alt+B", keys)
+
     def test_coregraphics_bgra_conversion_removes_row_padding(self):
         raw = bytes([
             1, 2, 3, 255, 4, 5, 6, 255, 99, 99, 99, 99,
@@ -66,6 +89,26 @@ class CalibrationTests(unittest.TestCase):
             [[1, 2, 3], [4, 5, 6]],
             [[7, 8, 9], [10, 11, 12]],
         ], dtype=np.uint8))
+
+    def test_saved_board_image_can_relocate_capture_automatically(self):
+        reference = np.zeros((240, 240, 3), dtype=np.uint8)
+        for row in range(8):
+            for col in range(8):
+                color = (55, 90, 120) if (row + col) % 2 else (180, 205, 220)
+                reference[row * 30:(row + 1) * 30,
+                          col * 30:(col + 1) * 30] = color
+        desktop = np.zeros((600, 900, 3), dtype=np.uint8)
+        moved = cv2.resize(reference, (270, 270), interpolation=cv2.INTER_AREA)
+        desktop[170:440, 410:680] = moved
+
+        rect = capture.find_relocated_rect(
+            reference, desktop, [-100, 50, 800, 650])
+
+        self.assertIsNotNone(rect)
+        self.assertLessEqual(abs(rect[0] - 310), 3)
+        self.assertLessEqual(abs(rect[1] - 220), 3)
+        self.assertLessEqual(abs(rect[2] - 580), 3)
+        self.assertLessEqual(abs(rect[3] - 490), 3)
 
     def test_corner_order_is_normalized(self):
         self.assertEqual(normalize_rect([(900, 900), (100, 100)]),

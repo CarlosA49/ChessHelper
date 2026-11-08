@@ -1,11 +1,12 @@
 """Board vision: screenshots -> chess positions (FEN)."""
 import os
+import sys
 
 import chess
 import cv2
 import numpy as np
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES_DIR = os.path.join(BASE, "templates")
 
 CANON = 56           # canonical shape size for mask matching
@@ -229,6 +230,56 @@ def cells_to_fen(cells, color):
             parts.append(str(empty))
         ranks.append("".join(parts))
     return "/".join(ranks)
+
+
+def orientation_score(fen_part):
+    """Score orientation using directional evidence, primarily pawns."""
+    try:
+        position = chess.Board(f"{fen_part} w - - 0 1")
+    except ValueError:
+        return float("-inf")
+    score = 0.0
+    for square, piece in position.piece_map().items():
+        rank = chess.square_rank(square)
+        home = 0 if piece.color == chess.WHITE else 7
+        if piece.piece_type == chess.PAWN:
+            home = 1 if piece.color == chess.WHITE else 6
+            weight = 2.0
+        elif piece.piece_type == chess.KING:
+            # King positions are highly directional in openings but nearly
+            # random in sparse endings, so they must not drive auto-flips.
+            weight = 0.0
+        else:
+            weight = 0.5
+        score += weight * (3.5 - abs(rank - home))
+    return score
+
+
+def detect_orientation(cells, preferred="white"):
+    """Return the most plausible ``(orientation, placement)`` for a grid."""
+    candidates = []
+    for orientation in ("white", "black"):
+        fen_part = cells_to_fen(cells, orientation)
+        if valid_placement(fen_part):
+            preference = 0.01 if orientation == preferred else 0.0
+            candidates.append(
+                (orientation_score(fen_part) + preference,
+                 orientation, fen_part))
+    if not candidates:
+        return preferred, cells_to_fen(cells, preferred)
+    if len(candidates) == 1:
+        _score, orientation, fen_part = candidates[0]
+        return orientation, fen_part
+    candidates.sort(reverse=True)
+    best, second = candidates
+    # Sparse/endgame boards may be valid in both directions with no reliable
+    # visual evidence. Keep the saved/manual preference instead of guessing.
+    if best[0] - second[0] < 4.0:
+        for _score, orientation, fen_part in candidates:
+            if orientation == preferred:
+                return orientation, fen_part
+    _score, orientation, fen_part = best
+    return orientation, fen_part
 
 
 def valid_placement(fen_part):

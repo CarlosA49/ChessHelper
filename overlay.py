@@ -65,6 +65,20 @@ def _blend(first, second, amount):
     return "#" + "".join(f"{value:02x}" for value in rgb)
 
 
+def control_rows(platform=None):
+    """Return platform-native labels for the persistent shortcut guide."""
+    platform = platform or sys.platform
+    modifier = "Cmd+Option" if platform == "darwin" else "Ctrl+Alt"
+    return (
+        ("F7", "Hide / show this guide"),
+        ("F9", "Pause / resume"),
+        ("F10", "Recalibrate board"),
+        (f"{modifier}+B", "Switch side manually"),
+        (f"{modifier}+A", "Detect side automatically"),
+        ("F8", "Quit ChessHelper"),
+    )
+
+
 class Overlay:
     FRAME_MS = 40
 
@@ -77,6 +91,8 @@ class Overlay:
         self._phase = 0.0
         self._status_ring = None
         self._animation_job = None
+        self._controls_visible = True
+        self._controls_state = ("white", True)
         self._mac_window = None
         self.capture_window_id = None
         self._window_title = f"ChessHelper Overlay {os.getpid()}"
@@ -235,6 +251,53 @@ class Overlay:
             font=("Segoe UI Variable Display", 13, "bold"),
             fill=WHITE, width=max(180, x2 - x1 - 64), tags="status")
         self.root.update_idletasks()
+
+    def show_controls(self, color, automatic):
+        """Render the hotkey guide and current side-detection mode."""
+        self._controls_state = (color, automatic)
+        self.canvas.delete("controls")
+        if not self._controls_visible:
+            return
+
+        width = min(322, self.dimensions[0] - 36)
+        x2 = self.dimensions[0] - 18
+        x1 = x2 - width
+        y1 = 16 if self.dimensions[0] >= 1000 else 82
+        y2 = y1 + 196
+        self._rounded_rect(
+            x1 + 3, y1 + 4, x2 + 3, y2 + 4, 17,
+            fill="#02080d", outline="", tags="controls")
+        self._rounded_rect(
+            x1, y1, x2, y2, 17,
+            fill=NAVY, outline="#1f6072", width=1, tags="controls")
+
+        self.canvas.create_text(
+            x1 + 16, y1 + 19, text="CHESSHELPER CONTROLS", anchor="w",
+            font=("Segoe UI Variable Display", 10, "bold"),
+            fill=CYAN_SOFT, tags="controls")
+        mode = "AUTO" if automatic else "MANUAL"
+        side = color.upper()
+        self.canvas.create_text(
+            x2 - 16, y1 + 19, text=f"{side} · {mode}", anchor="e",
+            font=("Segoe UI Variable Display", 10, "bold"),
+            fill=WHITE, tags="controls")
+
+        for index, (key, action) in enumerate(control_rows()):
+            y = y1 + 48 + index * 23
+            self.canvas.create_text(
+                x1 + 16, y, text=key, anchor="w",
+                font=("Cascadia Mono", 9, "bold"), fill=CYAN,
+                tags="controls")
+            self.canvas.create_text(
+                x1 + 118, y, text=action, anchor="w",
+                font=("Segoe UI Variable Text", 9), fill=WHITE,
+                tags="controls")
+        self.root.update_idletasks()
+
+    def toggle_controls(self):
+        """Hide or restore the persistent hotkey guide."""
+        self._controls_visible = not self._controls_visible
+        self.show_controls(*self._controls_state)
 
     def show_arrow(self, x1, y1, x2, y2, label):
         """Show an animated direction guide without covering its destination."""
