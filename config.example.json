@@ -2,5 +2,6 @@
   "rect": null,
   "color": "white",
   "auto_color": true,
+  "auto_move": false,
   "think_ms": 1000
 }

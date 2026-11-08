@@ -3,6 +3,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+build/
+dist/
+*.spec
 
 # Downloaded/generated runtime assets
 stockfish/

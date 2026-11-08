@@ -77,6 +77,7 @@ class CalibrationTests(unittest.TestCase):
         keys = [key for key, _action in control_rows("darwin")]
         self.assertIn("Cmd+Option+B", keys)
         self.assertIn("Cmd+Option+A", keys)
+        self.assertIn("Cmd+Option+M", keys)
         self.assertNotIn("Ctrl+Alt+B", keys)
 
     def test_coregraphics_bgra_conversion_removes_row_padding(self):
@@ -89,6 +90,24 @@ class CalibrationTests(unittest.TestCase):
             [[1, 2, 3], [4, 5, 6]],
             [[7, 8, 9], [10, 11, 12]],
         ], dtype=np.uint8))
+
+    def test_screen_capture_session_is_reused_and_closed_per_thread(self):
+        class FakeSession:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        capture.close_thread_capture()
+        session = FakeSession()
+        with unittest.mock.patch.object(
+                capture.mss, "mss", return_value=session) as constructor:
+            self.assertIs(capture._screen_capture(), session)
+            self.assertIs(capture._screen_capture(), session)
+        self.assertEqual(constructor.call_count, 1)
+        capture.close_thread_capture()
+        self.assertTrue(session.closed)
 
     def test_saved_board_image_can_relocate_capture_automatically(self):
         reference = np.zeros((240, 240, 3), dtype=np.uint8)
@@ -175,6 +194,23 @@ class MoveDetectionTests(unittest.TestCase):
         after = "r3k2r/8/8/8/8/8/8/R4RK1"
         self.assertTrue(bm.made_move(bm.make_board(before, "w"),
                                      bm.make_board(after, "w")))
+
+    def test_three_missed_half_moves_can_be_resynchronized(self):
+        tracked = chess.Board()
+        target = chess.Board()
+        expected = ["e2e4", "e7e5", "g1f3"]
+        for move in expected:
+            target.push_uci(move)
+
+        sequence = bm.find_move_sequence(
+            tracked, target.piece_map(), max_plies=3)
+
+        self.assertEqual(len(sequence), 3)
+        recovered = tracked.copy()
+        for move in sequence:
+            recovered.push(move)
+        self.assertEqual(recovered.piece_map(), target.piece_map())
+        self.assertEqual(tracked, chess.Board())
 
 
 if __name__ == "__main__":

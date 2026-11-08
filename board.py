@@ -66,6 +66,7 @@ def load_template_sets():
                     "gray": gray_trimmed,
                     "mean": float(gray[alpha].mean()),
                     "bgra": bgra,
+                    "aligned_cache": {},
                 }
             if not ok:
                 break
@@ -153,16 +154,13 @@ def classify_cell(cell, sets):
     return best
 
 
-def classify_grid(cells, sets):
-    """Classify a position with one consistent piece theme.
-
-    Chess.com piece PNGs occupy a complete square.  Composite each official
-    PNG over the observed square color and compare the aligned pixels.  The
-    old implementation cropped every piece to its silhouette and freely mixed
-    themes, which caused systematic errors on the outer files.
-    """
+def classify_grid_candidates(cells, sets, indices=None):
+    """Return theme candidates sorted by plausibility and visual error."""
+    if indices is None:
+        indices = range(len(sets))
     candidates = []
-    for template_set in sets:
+    for index in indices:
+        template_set = sets[index]
         grid = []
         errors = []
         for row in cells:
@@ -175,12 +173,24 @@ def classify_grid(cells, sets):
             grid.append(out_row)
         average_error = float(np.mean(errors)) if errors else float("inf")
         fen_part = cells_to_fen(grid, "white")
-        candidates.append((not valid_placement(fen_part), average_error, grid))
+        candidates.append(
+            (not valid_placement(fen_part), average_error, index, grid))
+    return sorted(candidates, key=lambda item: (item[0], item[1]))
 
+
+def classify_grid(cells, sets):
+    """Classify a position with one consistent piece theme.
+
+    Chess.com piece PNGs occupy a complete square.  Composite each official
+    PNG over the observed square color and compare the aligned pixels.  The
+    old implementation cropped every piece to its silhouette and freely mixed
+    themes, which caused systematic errors on the outer files.
+    """
+    candidates = classify_grid_candidates(cells, sets)
     if not candidates:
         return [[None for _ in row] for row in cells]
     # Prefer a structurally plausible board, then the lowest whole-board error.
-    return min(candidates, key=lambda item: (item[0], item[1]))[2]
+    return candidates[0][3]
 
 
 def _classify_aligned(cell, template_set):
@@ -194,10 +204,20 @@ def _classify_aligned(cell, template_set):
     best_piece = None
     best_error = float("inf")
     for key, meta in template_set.items():
-        template = cv2.resize(meta["bgra"], (w, h), interpolation=cv2.INTER_AREA)
-        alpha = template[:, :, 3:4].astype(np.float32) / 255.0
-        rendered = (template[:, :, :3].astype(np.float32) * alpha
-                    + bg.reshape(1, 1, 3) * (1.0 - alpha))
+        cache = meta["aligned_cache"]
+        cached = cache.get((w, h))
+        if cached is None:
+            template = cv2.resize(
+                meta["bgra"], (w, h), interpolation=cv2.INTER_AREA)
+            alpha = template[:, :, 3:4].astype(np.float32) / 255.0
+            foreground = template[:, :, :3].astype(np.float32) * alpha
+            background_weight = 1.0 - alpha
+            cached = foreground, background_weight
+            if len(cache) >= 8:
+                cache.pop(next(iter(cache)))
+            cache[(w, h)] = cached
+        foreground, background_weight = cached
+        rendered = foreground + bg.reshape(1, 1, 3) * background_weight
         error = float(np.abs(observed - rendered).mean())
         if error < best_error:
             best_error = error
@@ -382,6 +402,43 @@ def find_two_moves(board, target_map):
                 return first, second
         board.pop()
     return None
+
+
+def find_move_sequence(board, target_map, max_plies=3):
+    """Find up to ``max_plies`` legal moves leading to ``target_map``.
+
+    This is a recovery path for captures missed while Stockfish or desktop
+    capture was briefly busy. The caller should invoke it only after a target
+    has remained stable, since depth-three search is intentionally bounded.
+    """
+    if board.piece_map() == target_map:
+        return []
+
+    seen = set()
+
+    def search(remaining):
+        if remaining <= 0:
+            return None
+        state = (
+            board.board_fen(), board.turn, board.castling_rights,
+            board.ep_square, remaining,
+        )
+        if state in seen:
+            return None
+        seen.add(state)
+        for move in list(board.legal_moves):
+            board.push(move)
+            try:
+                if board.piece_map() == target_map:
+                    return [move]
+                suffix = search(remaining - 1)
+                if suffix is not None:
+                    return [move, *suffix]
+            finally:
+                board.pop()
+        return None
+
+    return search(max_plies)
 
 
 def square_center(sq, rect, color):

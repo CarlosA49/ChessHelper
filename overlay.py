@@ -75,6 +75,7 @@ def control_rows(platform=None):
         ("F10", "Recalibrate board"),
         (f"{modifier}+B", "Switch side manually"),
         (f"{modifier}+A", "Detect side automatically"),
+        (f"{modifier}+M", "Toggle automatic moves"),
         ("F8", "Quit ChessHelper"),
     )
 
@@ -92,7 +93,7 @@ class Overlay:
         self._status_ring = None
         self._animation_job = None
         self._controls_visible = True
-        self._controls_state = ("white", True)
+        self._controls_state = ("white", True, False)
         self._mac_window = None
         self.capture_window_id = None
         self._window_title = f"ChessHelper Overlay {os.getpid()}"
@@ -252,18 +253,18 @@ class Overlay:
             fill=WHITE, width=max(180, x2 - x1 - 64), tags="status")
         self.root.update_idletasks()
 
-    def show_controls(self, color, automatic):
+    def show_controls(self, color, automatic, auto_move=False):
         """Render the hotkey guide and current side-detection mode."""
-        self._controls_state = (color, automatic)
+        self._controls_state = (color, automatic, auto_move)
         self.canvas.delete("controls")
         if not self._controls_visible:
             return
 
-        width = min(322, self.dimensions[0] - 36)
+        width = min(350, self.dimensions[0] - 36)
         x2 = self.dimensions[0] - 18
         x1 = x2 - width
         y1 = 16 if self.dimensions[0] >= 1000 else 82
-        y2 = y1 + 196
+        y2 = y1 + 244
         self._rounded_rect(
             x1 + 3, y1 + 4, x2 + 3, y2 + 4, 17,
             fill="#02080d", outline="", tags="controls")
@@ -282,8 +283,15 @@ class Overlay:
             font=("Segoe UI Variable Display", 10, "bold"),
             fill=WHITE, tags="controls")
 
+        move_color = "#72ff9b" if auto_move else "#8ca2ad"
+        move_state = "ON" if auto_move else "OFF"
+        self.canvas.create_text(
+            x1 + 16, y1 + 43, text=f"AUTOMATIC MOVES: {move_state}",
+            anchor="w", font=("Segoe UI Variable Display", 9, "bold"),
+            fill=move_color, tags="controls")
+
         for index, (key, action) in enumerate(control_rows()):
-            y = y1 + 48 + index * 23
+            y = y1 + 70 + index * 23
             self.canvas.create_text(
                 x1 + 16, y, text=key, anchor="w",
                 font=("Cascadia Mono", 9, "bold"), fill=CYAN,

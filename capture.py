@@ -1,17 +1,36 @@
 """Fast screen capture of the calibrated board rectangle."""
 import sys
+import threading
 
 import cv2
 import mss
 import numpy as np
 
 _EXCLUDED_WINDOW_ID = None
+_CAPTURE_LOCAL = threading.local()
 
 
 def set_excluded_window(window_id):
     """On macOS, capture windows below this overlay window."""
     global _EXCLUDED_WINDOW_ID
     _EXCLUDED_WINDOW_ID = int(window_id) if window_id is not None else None
+
+
+def _screen_capture():
+    """Reuse one mss session per worker thread for long-running capture."""
+    session = getattr(_CAPTURE_LOCAL, "session", None)
+    if session is None:
+        session = mss.mss()
+        _CAPTURE_LOCAL.session = session
+    return session
+
+
+def close_thread_capture():
+    """Release the current thread's persistent desktop capture resources."""
+    session = getattr(_CAPTURE_LOCAL, "session", None)
+    if session is not None:
+        session.close()
+        del _CAPTURE_LOCAL.session
 
 
 def _bytes_to_bgr(data, width, height, bytes_per_row):
@@ -50,20 +69,19 @@ def grab(rect):
     if sys.platform == "darwin" and _EXCLUDED_WINDOW_ID is not None:
         return _grab_macos_below_overlay(rect)
     left, top, right, bottom = rect
-    with mss.mss() as sct:
-        mon = {"left": left, "top": top,
-               "width": right - left, "height": bottom - top}
-        shot = sct.grab(mon)
-        img = np.asarray(shot)
-        return img[:, :, :3].copy()  # BGRA -> BGR
+    sct = _screen_capture()
+    mon = {"left": left, "top": top,
+           "width": right - left, "height": bottom - top}
+    shot = sct.grab(mon)
+    img = np.asarray(shot)
+    return img[:, :, :3].copy()  # BGRA -> BGR
 
 
 def grab_virtual_screen():
     """Capture the whole virtual desktop and return ``(image, rect)``."""
-    with mss.mss() as sct:
-        mon = sct.monitors[0]
-        rect = [mon["left"], mon["top"],
-                mon["left"] + mon["width"], mon["top"] + mon["height"]]
+    mon = _screen_capture().monitors[0]
+    rect = [mon["left"], mon["top"],
+            mon["left"] + mon["width"], mon["top"] + mon["height"]]
     return grab(rect), rect
 
 

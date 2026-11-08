@@ -14,7 +14,7 @@ import threading
 import time
 
 import chess
-from pynput import keyboard
+from pynput import keyboard, mouse
 
 import board as bm
 import calibrate
@@ -61,6 +61,14 @@ def side_shortcuts(platform=None):
         "<ctrl>+<alt>+b", "<ctrl>+<alt>+a",
         "Ctrl+Alt+B", "Ctrl+Alt+A",
     )
+
+
+def auto_move_shortcut(platform=None):
+    """Return the native auto-move hotkey and display label."""
+    platform = platform or sys.platform
+    if platform == "darwin":
+        return "<cmd>+<alt>+m", "Cmd+Option+M"
+    return "<ctrl>+<alt>+m", "Ctrl+Alt+M"
 
 if sys.platform == "win32":
     try:
@@ -125,6 +133,7 @@ def load_cfg():
     cfg.setdefault("rect", None)
     cfg.setdefault("color", "white")
     cfg.setdefault("auto_color", True)
+    cfg.setdefault("auto_move", False)
     cfg.setdefault("think_ms", 500)
     rect = cfg.get("rect")
     if (not isinstance(rect, list) or len(rect) != 4
@@ -143,6 +152,10 @@ def load_cfg():
         cfg["color"] = "white"
     if not isinstance(cfg["auto_color"], bool):
         cfg["auto_color"] = True
+    if not isinstance(cfg["auto_move"], bool):
+        cfg["auto_move"] = False
+    # Automatic clicking always requires an explicit opt-in for this session.
+    cfg["auto_move"] = False
     try:
         cfg["think_ms"] = max(100, min(10000, int(cfg["think_ms"])))
     except (TypeError, ValueError):
@@ -173,6 +186,7 @@ class Assistant:
         self.worker = None
         self.calibration_pending = False
         self.templates = bm.load_template_sets()
+        self.template_index = None
         self.prev_fen = None
         self.position = None
         self.pending_move = None
@@ -185,6 +199,7 @@ class Assistant:
         self.last_move_status = None
         self.last_board_image = None
         self.last_relocation_attempt = 0.0
+        self.auto_move_in_progress = False
         self.last_status = None
 
     # ---------- overlay plumbing (main thread) ----------
@@ -211,6 +226,62 @@ class Assistant:
                 self.overlay.root.after(50, self.poll)
 
     # ---------- capture / analyze loop (worker thread) ----------
+    def _placement_priority(self, fen_part):
+        """Prefer observations consistent with the tracked legal position."""
+        if not bm.valid_placement(fen_part):
+            return 100
+        if self.position is None or fen_part == self.prev_fen:
+            return 0
+        target = bm.make_board(fen_part, self.cfg["color"][0]).piece_map()
+        return 1 if bm.find_move(self.position, target) is not None else 10
+
+    def _classify_observation(self, cells):
+        """Classify with the active theme, falling back to legal candidates."""
+        indices = None
+        if self.template_index is not None:
+            indices = [self.template_index]
+        candidates = bm.classify_grid_candidates(
+            cells, self.templates, indices=indices)
+
+        observations = []
+        for _invalid, error, index, grid in candidates:
+            orientation = self.cfg["color"]
+            if self.cfg["auto_color"] and self.position is None:
+                orientation, fen_part = bm.detect_orientation(
+                    grid, self.cfg["color"])
+            else:
+                fen_part = bm.cells_to_fen(grid, self.cfg["color"])
+            observations.append((
+                self._placement_priority(fen_part), error, index,
+                orientation, fen_part, grid,
+            ))
+
+        # If the locked theme cannot form a plausible placement, compare all
+        # themes immediately rather than waiting through invalid-frame retries.
+        if (self.template_index is not None
+                and (not observations or observations[0][0] >= 100)):
+            candidates = bm.classify_grid_candidates(cells, self.templates)
+            observations = []
+            for _invalid, error, index, grid in candidates:
+                orientation = self.cfg["color"]
+                if self.cfg["auto_color"] and self.position is None:
+                    orientation, fen_part = bm.detect_orientation(
+                        grid, self.cfg["color"])
+                else:
+                    fen_part = bm.cells_to_fen(grid, self.cfg["color"])
+                observations.append((
+                    self._placement_priority(fen_part), error, index,
+                    orientation, fen_part, grid,
+                ))
+
+        if not observations:
+            empty = [[None for _ in range(8)] for _ in range(8)]
+            return self.cfg["color"], "8/8/8/8/8/8/8/8", empty
+        _priority, _error, index, orientation, fen_part, grid = min(
+            observations, key=lambda item: (item[0], item[1]))
+        self.template_index = index
+        return orientation, fen_part, grid
+
     def tick(self):
         if self.paused:
             self.status("Paused — press F9 to resume")
@@ -233,15 +304,9 @@ class Assistant:
             self.status("Reading board… wait for squares to settle")
         img = capture.grab(rect)
         cells = bm.grid_cells(img)
-        grid = bm.classify_grid(cells, self.templates)
-        detected_orientation = self.cfg["color"]
-        if self.cfg["auto_color"] and self.position is None:
-            detected_orientation, fen_part = bm.detect_orientation(
-                grid, self.cfg["color"])
-        else:
-            fen_part = bm.cells_to_fen(grid, self.cfg["color"])
+        detected_orientation, fen_part, _grid = self._classify_observation(cells)
         if not bm.valid_placement(fen_part):
-            self.invalid_count += 1
+            self.invalid_count = min(self.invalid_count + 1, 1000)
             self.stable_count = 0
             if self.invalid_count == 4:
                 self.status("Checking board — retrying automatically…")
@@ -255,7 +320,7 @@ class Assistant:
             return
         self.invalid_count = 0
         if fen_part == self.stable_fen:
-            self.stable_count += 1
+            self.stable_count = min(self.stable_count + 1, 3)
         else:
             self.stable_fen = fen_part
             self.stable_count = 1
@@ -292,10 +357,8 @@ class Assistant:
             if not candidate or candidate == self.cfg.get("rect"):
                 return
             candidate_img = capture.grab(candidate)
-            candidate_grid = bm.classify_grid(
-                bm.grid_cells(candidate_img), self.templates)
-            orientation, fen_part = bm.detect_orientation(
-                candidate_grid, self.cfg["color"])
+            orientation, fen_part, _grid = self._classify_observation(
+                bm.grid_cells(candidate_img))
             if not bm.valid_placement(fen_part):
                 return
             self.cfg["rect"] = candidate
@@ -375,7 +438,7 @@ class Assistant:
                 return
 
         if fen_part == self.rejected_fen:
-            self.rejected_count += 1
+            self.rejected_count = min(self.rejected_count + 1, 1000)
         else:
             self.rejected_fen = fen_part
             self.rejected_count = 1
@@ -387,6 +450,27 @@ class Assistant:
             self.post(self.overlay.clear)
             self.on_new_position(fen_part)
             return
+
+        # If capture or analysis briefly stalled, several half-moves may have
+        # passed between accepted frames. Recover the legal history instead of
+        # remaining permanently stuck on a stable, newer position.
+        if self.rejected_count == 3:
+            sequence = bm.find_move_sequence(
+                self.position, target, max_plies=3)
+            if sequence:
+                for move in sequence:
+                    self.position.push(move)
+                self.prev_fen = fen_part
+                self.pending_move = None
+                self._clear_rejected_position()
+                if self.position.turn == (me == "w"):
+                    self._suggest_move(me)
+                else:
+                    self.waiting_for = "opponent"
+                    self.post(self.overlay.clear)
+                    self.status(
+                        "Position resynchronized — waiting for opponent")
+                return
         old_count = len(self.position.piece_map())
         new_count = len(target)
         definitely_new = (
@@ -403,6 +487,9 @@ class Assistant:
         # Keep the existing arrow during recognition noise, but do not leave
         # the status stuck on "stabilizing" indefinitely.
         if self.rejected_count >= 3:
+            # The visually closest theme produced no legal continuation. Force
+            # a full-theme comparison on the next capture.
+            self.template_index = None
             self.status("Checking board — retrying automatically…")
 
     def _suggest_move(self, me):
@@ -439,6 +526,52 @@ class Assistant:
         self.last_move_status = f"Suggested move: {san} — follow the arrow"
         self.last_status = "move:" + best
         self.status(self.last_move_status)
+        self._start_auto_move(mv)
+
+    def _start_auto_move(self, move):
+        """Click a suggested move when the explicit auto-move mode is on."""
+        if (not self.cfg.get("auto_move") or self.auto_move_in_progress
+                or self.paused or not self.running):
+            return None
+        if move.promotion is not None:
+            self.status(
+                "Promotion ready — move manually to choose the promoted piece")
+            return None
+
+        start = bm.square_center(
+            move.from_square, self.cfg["rect"], self.cfg["color"])
+        end = bm.square_center(
+            move.to_square, self.cfg["rect"], self.cfg["color"])
+        self.auto_move_in_progress = True
+
+        def perform():
+            try:
+                time.sleep(0.04)
+                if (not self.cfg.get("auto_move") or self.paused
+                        or self.pending_move != move
+                        or self.waiting_for != "our_move"):
+                    return
+                controller = mouse.Controller()
+                controller.position = start
+                controller.click(mouse.Button.left)
+                time.sleep(0.04)
+                if (not self.cfg.get("auto_move") or self.paused
+                        or self.pending_move != move
+                        or self.waiting_for != "our_move"):
+                    return
+                controller.position = end
+                controller.click(mouse.Button.left)
+                self.status("Move played automatically — confirming board…")
+            except Exception as error:
+                print("automatic move failed:", error)
+                self.status(
+                    "Automatic move failed — play manually or disable auto-move")
+            finally:
+                self.auto_move_in_progress = False
+
+        worker = threading.Thread(target=perform, daemon=True)
+        worker.start()
+        return worker
 
     def _restore_status(self):
         """Restore useful state text after temporary capture noise."""
@@ -462,13 +595,17 @@ class Assistant:
         self._clear_rejected_position()
 
     def loop(self):
-        while self.running:
-            try:
-                self.tick()
-            except Exception as e:
-                print("tick error:", e)
-                self.status(f"Read error: {str(e)[:80]}")
-            time.sleep(0.15)
+        try:
+            while self.running:
+                try:
+                    self.tick()
+                except Exception as e:
+                    print("tick error:", e)
+                    self.status(f"Read error: {str(e)[:80]}")
+                time.sleep(0.15)
+        finally:
+            with contextlib.suppress(Exception):
+                capture.close_thread_capture()
 
     # ---------- calibration ----------
     def _do_calibrate(self):
@@ -497,6 +634,8 @@ class Assistant:
             return
         if rect:
             self.cfg["rect"] = rect
+            # A new board size/theme needs a fresh best-template decision.
+            self.template_index = None
             save_cfg(self.cfg)
             self.overlay.set_board_rect(rect)
             self._reset_position_tracking()
@@ -518,7 +657,9 @@ class Assistant:
         if self.overlay:
             color = self.cfg["color"]
             automatic = self.cfg["auto_color"]
-            self.post(lambda: self.overlay.show_controls(color, automatic))
+            auto_move = self.cfg["auto_move"]
+            self.post(lambda: self.overlay.show_controls(
+                color, automatic, auto_move))
 
     def on_hotkey(self, key_name):
         if key_name == "f7":
@@ -561,6 +702,15 @@ class Assistant:
             self._refresh_controls()
             self.last_status = None
             self.status("Automatic side detection enabled — reading board…")
+        elif key_name == "auto_move":
+            self.cfg["auto_move"] = not self.cfg["auto_move"]
+            self._refresh_controls()
+            self.last_status = None
+            state = "enabled" if self.cfg["auto_move"] else "disabled"
+            self.status(f"Automatic move mode {state}")
+            if (self.cfg["auto_move"] and self.pending_move is not None
+                    and self.waiting_for == "our_move"):
+                self._start_auto_move(self.pending_move)
         elif key_name == "f8":
             self.shutdown()
 
@@ -569,6 +719,7 @@ class Assistant:
             return lambda: self.on_hotkey(name)
 
         switch_key, auto_key, _switch_label, _auto_label = side_shortcuts()
+        move_key, _move_label = auto_move_shortcut()
         with keyboard.GlobalHotKeys({
             "<f7>": handler("f7"),
             "<f8>": handler("f8"),
@@ -576,6 +727,7 @@ class Assistant:
             "<f10>": handler("f10"),
             switch_key: handler("switch_color"),
             auto_key: handler("auto_color"),
+            move_key: handler("auto_move"),
         }) as h:
             h.join()
 
@@ -590,7 +742,8 @@ class Assistant:
         capture.set_excluded_window(self.overlay.capture_window_id)
         self.overlay.set_board_rect(self.cfg.get("rect"))
         self.overlay.show_controls(
-            self.cfg["color"], self.cfg["auto_color"])
+            self.cfg["color"], self.cfg["auto_color"],
+            self.cfg["auto_move"])
         if not self.templates:
             print("Piece templates missing or incomplete.")
             print("Run: .venv\\Scripts\\python setup.py")
@@ -620,8 +773,10 @@ class Assistant:
             self.calibration_pending = True
             self.overlay.root.after(400, self._do_calibrate)
         _switch_key, _auto_key, switch_label, auto_label = side_shortcuts()
+        _move_key, move_label = auto_move_shortcut()
         print("hotkeys: F7 controls | F9 pause | F10 calibrate | "
-              f"{switch_label} switch color | {auto_label} auto color | F8 quit")
+              f"{switch_label} switch color | {auto_label} auto color | "
+              f"{move_label} auto-move | F8 quit")
         try:
             self.overlay.root.mainloop()
         finally:

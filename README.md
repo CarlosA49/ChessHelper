@@ -59,10 +59,18 @@ again. Apple Silicon and Intel Homebrew paths are both detected automatically.
 | Ctrl+Alt+A | restore automatic color detection on Windows/Linux |
 | Cmd+Option+B | manually switch color on macOS |
 | Cmd+Option+A | restore automatic color detection on macOS |
+| Ctrl+Alt+M | toggle automatic moves on Windows/Linux |
+| Cmd+Option+M | toggle automatic moves on macOS |
 | F8   | quit                          |
 
 The overlay displays this guide in the upper-right corner together with the
 current side and `AUTO` or `MANUAL` orientation mode.
+
+Automatic moves are disabled at every launch and require an explicit opt-in
+for the current session. When enabled, ChessHelper clicks the suggested source
+and destination squares after analysis. Promotions remain manual so the
+desired promotion piece can be selected safely. Use automated play only on
+boards and game modes whose rules permit it.
 
 On a Mac keyboard configured to use media controls, hold `fn` while pressing
 the function-key shortcuts. The on-screen guide automatically shows the native
@@ -78,7 +86,10 @@ Mac `Cmd+Option` combinations.
 - Board orientation and your side are detected automatically at the start of
   each game. Move notation is normalized for both White and Black.
 - Stockfish searches for your side; the best move is drawn on a transparent,
-  click-through overlay. You move the piece yourself.
+  click-through overlay. You can move the piece yourself or explicitly enable
+  automatic moves for the current session.
+- The reader locks onto the matching piece theme, reuses capture resources,
+  and can recover several missed half-moves after a temporary screen stall.
 
 ## Notes
 

@@ -27,8 +27,8 @@ class FakeOverlay:
     def show_status(self, text):
         self.calls.append(("status", text))
 
-    def show_controls(self, color, automatic):
-        self.calls.append(("controls", color, automatic))
+    def show_controls(self, color, automatic, auto_move=False):
+        self.calls.append(("controls", color, automatic, auto_move))
 
     def toggle_controls(self):
         self.calls.append(("toggle_controls",))
@@ -222,6 +222,16 @@ def test_invalid_saved_calibration_is_discarded():
         assert cfg["rect"] is None, rect
 
 
+def test_auto_move_is_always_off_at_application_start():
+    with tempfile.TemporaryDirectory() as tmp:
+        config = os.path.join(tmp, "config.json")
+        with open(config, "w", encoding="utf-8") as f:
+            json.dump({"auto_move": True}, f)
+        with unittest.mock.patch.object(main, "CONFIG", config):
+            cfg = main.load_cfg()
+    assert cfg["auto_move"] is False
+
+
 def test_config_save_is_atomic_and_leaves_no_temporary_file():
     with tempfile.TemporaryDirectory() as tmp:
         config = os.path.join(tmp, "config.json")
@@ -266,6 +276,10 @@ def test_side_shortcuts_are_native_on_windows_and_macos():
     assert main.side_shortcuts("darwin") == (
         "<cmd>+<alt>+b", "<cmd>+<alt>+a",
         "Cmd+Option+B", "Cmd+Option+A")
+    assert main.auto_move_shortcut("win32") == (
+        "<ctrl>+<alt>+m", "Ctrl+Alt+M")
+    assert main.auto_move_shortcut("darwin") == (
+        "<cmd>+<alt>+m", "Cmd+Option+M")
 
 
 def test_macos_permission_check_uses_native_authorization_apis():
@@ -321,7 +335,7 @@ def test_browser_safe_color_hotkey_disables_auto_detection():
     assert assistant.cfg["auto_color"] is False
 
     flush_ui(assistant)
-    assert ("controls", "black", False) in assistant.overlay.calls
+    assert ("controls", "black", False, False) in assistant.overlay.calls
 
 
 def test_invalid_frame_breaks_stability_without_replacing_reference():
@@ -347,6 +361,56 @@ def test_invalid_frame_breaks_stability_without_replacing_reference():
     assert assistant.last_board_image is reference
 
 
+def test_classifier_prefers_legal_history_over_lower_visual_error():
+    assistant = Assistant()
+    assistant.cfg["auto_color"] = False
+    assistant.cfg["color"] = "white"
+    assistant.position = chess.Board()
+    assistant.prev_fen = assistant.position.board_fen()
+    impossible = "rnbqkbnr/pppppppp/8/8/3PP3/8/PPP2PPP/RNBQKBNR"
+    after_e4 = placement_after(["e2e4"])
+    noisy_grid = object()
+    legal_grid = object()
+
+    def to_fen(grid, _color):
+        return impossible if grid is noisy_grid else after_e4
+
+    with (unittest.mock.patch.object(
+              main.bm, "classify_grid_candidates",
+              return_value=[
+                  (False, 1.0, 0, noisy_grid),
+                  (False, 10.0, 1, legal_grid),
+              ]),
+          unittest.mock.patch.object(
+              main.bm, "cells_to_fen", side_effect=to_fen)):
+        _orientation, fen_part, selected = assistant._classify_observation([])
+
+    assert fen_part == after_e4
+    assert selected is legal_grid
+    assert assistant.template_index == 1
+
+
+def test_assistant_recovers_three_missed_half_moves():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    assistant.engine = FakeEngine()
+    assistant.cfg["color"] = "white"
+    assistant.cfg["rect"] = [100, 100, 900, 900]
+    start = chess.STARTING_FEN.split(" ")[0]
+    target = placement_after(["e2e4", "e7e5", "g1f3"])
+    assistant.position = chess.Board()
+    assistant.prev_fen = start
+    assistant.waiting_for = "our_move"
+
+    for _ in range(3):
+        assistant.on_new_position(target)
+
+    assert assistant.prev_fen == target
+    assert assistant.position.board_fen() == target
+    assert assistant.waiting_for == "opponent"
+    assert not assistant.engine.calls
+
+
 def test_relocation_recalculates_arrow_for_new_coordinates():
     assistant = Assistant()
     assistant.overlay = FakeOverlay()
@@ -370,7 +434,11 @@ def test_relocation_recalculates_arrow_for_new_coordinates():
               main.capture, "find_relocated_rect", return_value=candidate),
           unittest.mock.patch.object(main.capture, "grab", return_value=image),
           unittest.mock.patch.object(main.bm, "grid_cells", return_value=[]),
-          unittest.mock.patch.object(main.bm, "classify_grid", return_value=[]),
+          unittest.mock.patch.object(
+              main.bm, "classify_grid_candidates",
+              return_value=[(False, 0.0, 0, [])]),
+          unittest.mock.patch.object(
+              main.bm, "cells_to_fen", return_value=assistant.prev_fen),
           unittest.mock.patch.object(
               main.bm, "detect_orientation",
               return_value=("white", assistant.prev_fen)),
@@ -386,6 +454,55 @@ def test_relocation_recalculates_arrow_for_new_coordinates():
     assert ("board_rect", candidate) in assistant.overlay.calls
 
 
+def test_auto_move_clicks_source_then_destination():
+    assistant = Assistant()
+    assistant.cfg["rect"] = [100, 200, 900, 1000]
+    assistant.cfg["color"] = "white"
+    assistant.cfg["auto_move"] = True
+    move = chess.Move.from_uci("e2e4")
+    assistant.pending_move = move
+    assistant.waiting_for = "our_move"
+    events = []
+
+    class FakeMouse:
+        @property
+        def position(self):
+            return None
+
+        @position.setter
+        def position(self, value):
+            events.append(("position", value))
+
+        def click(self, button):
+            events.append(("click", button))
+
+    with (unittest.mock.patch.object(
+              main.mouse, "Controller", return_value=FakeMouse()),
+          unittest.mock.patch.object(main.time, "sleep")):
+        worker = assistant._start_auto_move(move)
+        worker.join(timeout=2)
+
+    assert events == [
+        ("position", bm.square_center(chess.E2, assistant.cfg["rect"], "white")),
+        ("click", main.mouse.Button.left),
+        ("position", bm.square_center(chess.E4, assistant.cfg["rect"], "white")),
+        ("click", main.mouse.Button.left),
+    ]
+
+
+def test_auto_move_never_clicks_promotions():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    assistant.cfg["rect"] = [100, 200, 900, 1000]
+    assistant.cfg["auto_move"] = True
+    move = chess.Move.from_uci("a7a8q")
+    assistant.pending_move = move
+    assistant.waiting_for = "our_move"
+    with unittest.mock.patch.object(main.mouse, "Controller") as controller:
+        assert assistant._start_auto_move(move) is None
+    assert not controller.called
+
+
 def load_tests(loader, tests, pattern):
     suite = unittest.TestSuite()
     for fn in (
@@ -398,6 +515,7 @@ def load_tests(loader, tests, pattern):
         test_failed_analysis_remains_pending_and_can_retry_same_position,
         test_float_config_rect_is_normalized_for_screen_capture,
         test_invalid_saved_calibration_is_discarded,
+        test_auto_move_is_always_off_at_application_start,
         test_config_save_is_atomic_and_leaves_no_temporary_file,
         test_packaged_apps_use_writable_platform_config_directories,
         test_stockfish_environment_override_is_cross_platform,
@@ -408,7 +526,11 @@ def load_tests(loader, tests, pattern):
         test_status_recovers_after_transient_unreadable_frame,
         test_browser_safe_color_hotkey_disables_auto_detection,
         test_invalid_frame_breaks_stability_without_replacing_reference,
+        test_classifier_prefers_legal_history_over_lower_visual_error,
+        test_assistant_recovers_three_missed_half_moves,
         test_relocation_recalculates_arrow_for_new_coordinates,
+        test_auto_move_clicks_source_then_destination,
+        test_auto_move_never_clicks_promotions,
     ):
         suite.addTest(unittest.FunctionTestCase(fn))
     return suite
