@@ -454,6 +454,67 @@ def test_relocation_recalculates_arrow_for_new_coordinates():
     assert ("board_rect", candidate) in assistant.overlay.calls
 
 
+def test_failed_relocation_never_claims_the_board_moved():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    assistant.cfg["rect"] = [0, 0, 800, 800]
+    assistant.last_board_image = np.zeros((800, 800, 3), dtype=np.uint8)
+    desktop = np.zeros((900, 1200, 3), dtype=np.uint8)
+
+    with (unittest.mock.patch.object(
+              main.capture, "grab_virtual_screen",
+              return_value=(desktop, [0, 0, 1200, 900])),
+          unittest.mock.patch.object(
+              main.capture, "find_relocated_rect", return_value=None)):
+        assert assistant._try_relocate_board() is False
+
+    flush_ui(assistant)
+    statuses = [call[1] for call in assistant.overlay.calls
+                if call[0] == "status"]
+    assert not any("moved" in status.lower() for status in statuses)
+    assert assistant.relocation_failures == 1
+
+
+def test_relocation_requires_two_identical_legal_reads():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    original = [0, 0, 800, 800]
+    candidate = [200, 100, 1000, 900]
+    assistant.cfg["rect"] = original
+    assistant.last_board_image = np.zeros((800, 800, 3), dtype=np.uint8)
+    start = chess.STARTING_FEN.split(" ")[0]
+    changed = placement_after(["e2e4"])
+    image = np.zeros((800, 800, 3), dtype=np.uint8)
+
+    with (unittest.mock.patch.object(
+              main.capture, "grab_virtual_screen",
+              return_value=(image, [0, 0, 1200, 900])),
+          unittest.mock.patch.object(
+              main.capture, "find_relocated_rect", return_value=candidate),
+          unittest.mock.patch.object(main.capture, "grab", return_value=image),
+          unittest.mock.patch.object(main.bm, "grid_cells", return_value=[]),
+          unittest.mock.patch.object(
+              assistant, "_classify_observation",
+              side_effect=[("white", start, []), ("white", changed, [])]),
+          unittest.mock.patch.object(main.time, "sleep"),
+          unittest.mock.patch.object(main, "save_cfg") as save):
+        assert assistant._try_relocate_board() is False
+
+    assert assistant.cfg["rect"] == original
+    assert not save.called
+    assert assistant.relocation_failures == 1
+
+
+def test_relocation_rejects_an_unrelated_valid_board():
+    assistant = Assistant()
+    assistant.cfg["color"] = "white"
+    assistant.position = chess.Board()
+    assistant.prev_fen = assistant.position.board_fen()
+    unrelated = placement_after(["e2e4", "e7e5", "g1f3", "b8c6"])
+
+    assert not assistant._relocation_position_plausible(unrelated)
+
+
 def test_auto_move_clicks_source_then_destination():
     assistant = Assistant()
     assistant.cfg["rect"] = [100, 200, 900, 1000]
@@ -529,6 +590,9 @@ def load_tests(loader, tests, pattern):
         test_classifier_prefers_legal_history_over_lower_visual_error,
         test_assistant_recovers_three_missed_half_moves,
         test_relocation_recalculates_arrow_for_new_coordinates,
+        test_failed_relocation_never_claims_the_board_moved,
+        test_relocation_requires_two_identical_legal_reads,
+        test_relocation_rejects_an_unrelated_valid_board,
         test_auto_move_clicks_source_then_destination,
         test_auto_move_never_clicks_promotions,
     ):

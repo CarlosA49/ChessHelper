@@ -73,6 +73,13 @@ class OrientationTests(unittest.TestCase):
 
 
 class CalibrationTests(unittest.TestCase):
+    def test_relocation_ignores_template_matching_jitter(self):
+        original = [100, 200, 900, 1000]
+        self.assertTrue(capture.rects_are_near(
+            original, [106, 194, 906, 994]))
+        self.assertFalse(capture.rects_are_near(
+            original, [125, 200, 925, 1000]))
+
     def test_control_guide_uses_native_mac_labels(self):
         keys = [key for key, _action in control_rows("darwin")]
         self.assertIn("Cmd+Option+B", keys)

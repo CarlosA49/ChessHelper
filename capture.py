@@ -85,6 +85,18 @@ def grab_virtual_screen():
     return grab(rect), rect
 
 
+def rects_are_near(first, second, tolerance=0.01):
+    """Return whether two board rectangles differ only by matching jitter."""
+    if not first or not second or len(first) != 4 or len(second) != 4:
+        return False
+    side = max(
+        first[2] - first[0], first[3] - first[1],
+        second[2] - second[0], second[3] - second[1],
+    )
+    allowed = max(4, round(side * tolerance))
+    return all(abs(a - b) <= allowed for a, b in zip(first, second))
+
+
 def find_relocated_rect(reference, desktop, desktop_rect,
                         min_score=0.58):
     """Find a moved/resized board using its last valid captured image.

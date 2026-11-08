@@ -199,6 +199,7 @@ class Assistant:
         self.last_move_status = None
         self.last_board_image = None
         self.last_relocation_attempt = 0.0
+        self.relocation_failures = 0
         self.auto_move_in_progress = False
         self.last_status = None
 
@@ -314,11 +315,15 @@ class Assistant:
                 self.status(
                     "Board still unreadable — keep it visible; "
                     "press F10 only if it moved")
+            relocation_delay = min(
+                120, 15 * (2 ** min(self.relocation_failures, 3)))
             if (self.invalid_count >= 20 and self.last_board_image is not None
-                    and time.monotonic() - self.last_relocation_attempt >= 15):
+                    and time.monotonic() - self.last_relocation_attempt
+                    >= relocation_delay):
                 self._try_relocate_board()
             return
         self.invalid_count = 0
+        self.relocation_failures = 0
         if fen_part == self.stable_fen:
             self.stable_count = min(self.stable_count + 1, 3)
         else:
@@ -347,20 +352,36 @@ class Assistant:
         self.on_new_position(fen_part)
 
     def _try_relocate_board(self):
-        """Search the desktop for a moved board and verify before adopting it."""
+        """Silently search, then adopt only a twice-verified moved board."""
         self.last_relocation_attempt = time.monotonic()
-        self.status("Board moved — searching for it automatically…")
+        original_template = self.template_index
+        adopted = False
         try:
             desktop, desktop_rect = capture.grab_virtual_screen()
             candidate = capture.find_relocated_rect(
                 self.last_board_image, desktop, desktop_rect)
-            if not candidate or candidate == self.cfg.get("rect"):
-                return
+            if (not candidate or capture.rects_are_near(
+                    candidate, self.cfg.get("rect"))):
+                return False
             candidate_img = capture.grab(candidate)
-            orientation, fen_part, _grid = self._classify_observation(
+            orientation, first_fen, _grid = self._classify_observation(
                 bm.grid_cells(candidate_img))
-            if not bm.valid_placement(fen_part):
-                return
+            if (not bm.valid_placement(first_fen)
+                    or not self._relocation_position_plausible(first_fen)):
+                return False
+
+            # A dialog, animation, or unrelated board can produce one
+            # convincing match. Require a second independent, stable read.
+            time.sleep(0.06)
+            confirmed_img = capture.grab(candidate)
+            confirmed_orientation, second_fen, _grid = (
+                self._classify_observation(bm.grid_cells(confirmed_img)))
+            if (second_fen != first_fen
+                    or confirmed_orientation != orientation
+                    or not bm.valid_placement(second_fen)
+                    or not self._relocation_position_plausible(second_fen)):
+                return False
+
             self.cfg["rect"] = candidate
             color_changed = False
             if self.cfg["auto_color"]:
@@ -369,8 +390,9 @@ class Assistant:
             save_cfg(self.cfg)
             if color_changed:
                 self._refresh_controls()
-            self.last_board_image = candidate_img
+            self.last_board_image = confirmed_img
             self.invalid_count = 0
+            self.relocation_failures = 0
             self.stable_fen = None
             self.stable_count = 0
             if self.waiting_for == "our_move":
@@ -381,10 +403,32 @@ class Assistant:
                 self.last_move_status = None
                 self.post(self.overlay.clear)
             self.post(lambda rect=candidate: self.overlay.set_board_rect(rect))
-            self.status("Board found and aligned automatically — reading position…")
+            self.status("Board relocation verified — reading position…")
             print("board relocated automatically:", candidate)
+            adopted = True
+            return True
         except Exception as error:
             print("automatic board relocation failed:", error)
+            return False
+        finally:
+            if not adopted:
+                self.template_index = original_template
+                self.relocation_failures = min(
+                    self.relocation_failures + 1, 4)
+
+    def _relocation_position_plausible(self, fen_part):
+        """Reject unrelated valid chessboards found elsewhere on screen."""
+        if self.position is None or fen_part == self.prev_fen:
+            return True
+        target = bm.make_board(fen_part, self.cfg["color"][0]).piece_map()
+        if bm.find_move_sequence(self.position, target, max_plies=3) is not None:
+            return True
+        start = chess.STARTING_FEN.split(" ")[0]
+        if fen_part == start:
+            return True
+        old_count = len(self.position.piece_map())
+        new_count = len(target)
+        return new_count >= 20 and new_count >= old_count + 4
 
     def on_new_position(self, fen_part):
         """Accept only legal turn-by-turn changes before replacing an arrow."""
@@ -644,6 +688,7 @@ class Assistant:
             self.invalid_count = 0
             self.last_board_image = None
             self.last_relocation_attempt = 0.0
+            self.relocation_failures = 0
             self.post(self.overlay.clear)
             print("calibration saved:", rect)
             self.last_status = None
