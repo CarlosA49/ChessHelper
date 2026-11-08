@@ -97,6 +97,90 @@ def rects_are_near(first, second, tolerance=0.01):
     return all(abs(a - b) <= allowed for a, b in zip(first, second))
 
 
+def _checkerboard_score(image):
+    """Score an image by its robust 8x8 alternating background colors."""
+    h, w = image.shape[:2]
+    if min(h, w) < 160:
+        return 0.0
+    colors = []
+    for row in range(8):
+        output_row = []
+        y1, y2 = round(row * h / 8), round((row + 1) * h / 8)
+        for col in range(8):
+            x1, x2 = round(col * w / 8), round((col + 1) * w / 8)
+            cell_side = min(y2 - y1, x2 - x1)
+            patch_size = max(2, cell_side // 10)
+            inset = max(1, cell_side // 12)
+            patches = (
+                image[y1 + inset:y1 + inset + patch_size,
+                      x1 + inset:x1 + inset + patch_size],
+                image[y1 + inset:y1 + inset + patch_size,
+                      x2 - inset - patch_size:x2 - inset],
+                image[y2 - inset - patch_size:y2 - inset,
+                      x1 + inset:x1 + inset + patch_size],
+                image[y2 - inset - patch_size:y2 - inset,
+                      x2 - inset - patch_size:x2 - inset],
+            )
+            pixels = np.concatenate(
+                [patch.reshape(-1, 3) for patch in patches])
+            output_row.append(np.median(pixels, axis=0))
+        colors.append(output_row)
+
+    colors = np.asarray(colors)
+    parity = np.indices((8, 8)).sum(axis=0) % 2
+    even, odd = colors[parity == 0], colors[parity == 1]
+    even_center = np.median(even, axis=0)
+    odd_center = np.median(odd, axis=0)
+    separation = float(np.linalg.norm(even_center - odd_center))
+    variation = float((
+        np.median(np.linalg.norm(even - even_center, axis=1))
+        + np.median(np.linalg.norm(odd - odd_center, axis=1))) / 2.0)
+    if separation < 18:
+        return 0.0
+    return separation / (variation + 5.0)
+
+
+def find_chessboard_rects(desktop, desktop_rect, max_candidates=8):
+    """Find likely digital 8x8 boards without prior calibration."""
+    if desktop is None or min(desktop.shape[:2]) < 160:
+        return []
+    _height, width = desktop.shape[:2]
+    scale = min(1.0, 1600.0 / width)
+    screen = cv2.resize(
+        desktop, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    gray = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 40, 120)
+    contours, _hierarchy = cv2.findContours(
+        edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+    candidates = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if min(w, h) < max(120, round(160 * scale)):
+            continue
+        if max(w, h) / min(w, h) > 1.06:
+            continue
+        if cv2.contourArea(contour) < 0.65 * w * h:
+            continue
+        crop = screen[y:y + h, x:x + w]
+        score = _checkerboard_score(crop)
+        if score < 1.5:
+            continue
+        rect = [
+            desktop_rect[0] + round(x / scale),
+            desktop_rect[1] + round(y / scale),
+            desktop_rect[0] + round((x + w) / scale),
+            desktop_rect[1] + round((y + h) / scale),
+        ]
+        if any(rects_are_near(rect, existing[1], tolerance=0.03)
+               for existing in candidates):
+            continue
+        candidates.append((score, rect))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [rect for _score, rect in candidates[:max_candidates]]
+
+
 def find_relocated_rect(reference, desktop, desktop_rect,
                         min_score=0.58):
     """Find a moved/resized board using its last valid captured image.

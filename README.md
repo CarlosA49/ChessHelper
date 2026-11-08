@@ -97,6 +97,8 @@ Mac `Cmd+Option` combinations.
   F10 only if automatic relocation cannot recover after the board moves or
   resizes. Menus, animations, and result dialogs are retried automatically and
   do not require recalibration.
+- If saved coordinates are stale at startup, ChessHelper scans the visible
+  desktop for an 8x8 board and saves its location only after two legal reads.
 - Keep the entire board visible and uncovered. ChessHelper reads visible screen
   pixels, so another window over the board prevents recognition.
 - Restart `start.bat` after updating the project so the new calibration window

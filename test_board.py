@@ -73,6 +73,31 @@ class OrientationTests(unittest.TestCase):
 
 
 class CalibrationTests(unittest.TestCase):
+    def test_full_screen_discovery_finds_an_uncalibrated_board(self):
+        board = np.zeros((640, 640, 3), dtype=np.uint8)
+        light, dark = (235, 236, 208), (119, 149, 86)
+        for row in range(8):
+            for col in range(8):
+                board[row * 80:(row + 1) * 80,
+                      col * 80:(col + 1) * 80] = (
+                          light if (row + col) % 2 == 0 else dark)
+        desktop = np.full((900, 1200, 3), 35, dtype=np.uint8)
+        desktop[130:770, 330:970] = board
+
+        candidates = capture.find_chessboard_rects(
+            desktop, [-100, 50, 1100, 950])
+
+        self.assertTrue(candidates)
+        self.assertTrue(capture.rects_are_near(
+            candidates[0], [230, 180, 870, 820]))
+
+    def test_full_screen_discovery_rejects_non_board_content(self):
+        desktop = np.full((900, 1200, 3), 35, dtype=np.uint8)
+        self.assertEqual(
+            capture.find_chessboard_rects(
+                desktop, [0, 0, 1200, 900]),
+            [])
+
     def test_relocation_ignores_template_matching_jitter(self):
         original = [100, 200, 900, 1000]
         self.assertTrue(capture.rects_are_near(

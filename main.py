@@ -317,9 +317,12 @@ class Assistant:
                     "press F10 only if it moved")
             relocation_delay = min(
                 120, 15 * (2 ** min(self.relocation_failures, 3)))
-            if (self.invalid_count >= 20 and self.last_board_image is not None
+            if (self.invalid_count >= 20
                     and time.monotonic() - self.last_relocation_attempt
                     >= relocation_delay):
+                if self.last_board_image is None:
+                    self.status(
+                        "Saved board area is stale — scanning the screen…")
                 self._try_relocate_board()
             return
         self.invalid_count = 0
@@ -358,55 +361,53 @@ class Assistant:
         adopted = False
         try:
             desktop, desktop_rect = capture.grab_virtual_screen()
-            candidate = capture.find_relocated_rect(
-                self.last_board_image, desktop, desktop_rect)
-            if (not candidate or capture.rects_are_near(
-                    candidate, self.cfg.get("rect"))):
-                return False
-            candidate_img = capture.grab(candidate)
-            orientation, first_fen, _grid = self._classify_observation(
-                bm.grid_cells(candidate_img))
-            if (not bm.valid_placement(first_fen)
-                    or not self._relocation_position_plausible(first_fen)):
+            if self.last_board_image is None:
+                candidates = capture.find_chessboard_rects(
+                    desktop, desktop_rect)
+            else:
+                candidate = capture.find_relocated_rect(
+                    self.last_board_image, desktop, desktop_rect)
+                candidates = [candidate] if candidate else []
+            if not candidates:
                 return False
 
-            # A dialog, animation, or unrelated board can produce one
-            # convincing match. Require a second independent, stable read.
-            time.sleep(0.06)
-            confirmed_img = capture.grab(candidate)
-            confirmed_orientation, second_fen, _grid = (
-                self._classify_observation(bm.grid_cells(confirmed_img)))
-            if (second_fen != first_fen
-                    or confirmed_orientation != orientation
-                    or not bm.valid_placement(second_fen)
-                    or not self._relocation_position_plausible(second_fen)):
-                return False
-
-            self.cfg["rect"] = candidate
-            color_changed = False
-            if self.cfg["auto_color"]:
-                color_changed = self.cfg["color"] != orientation
-                self.cfg["color"] = orientation
-            save_cfg(self.cfg)
-            if color_changed:
-                self._refresh_controls()
-            self.last_board_image = confirmed_img
-            self.invalid_count = 0
-            self.relocation_failures = 0
-            self.stable_fen = None
-            self.stable_count = 0
-            if self.waiting_for == "our_move":
-                # The existing arrow uses the old pixel rectangle. Request a
-                # fresh analysis so it is redrawn against the relocated board.
-                self.waiting_for = "analysis"
-                self.pending_move = None
-                self.last_move_status = None
-                self.post(self.overlay.clear)
-            self.post(lambda rect=candidate: self.overlay.set_board_rect(rect))
-            self.status("Board relocation verified — reading position…")
-            print("board relocated automatically:", candidate)
-            adopted = True
-            return True
+            for candidate in candidates:
+                if (self.last_board_image is not None
+                        and capture.rects_are_near(
+                            candidate, self.cfg.get("rect"))):
+                    continue
+                self.template_index = original_template
+                verified = self._verify_board_candidate(candidate)
+                if verified is None:
+                    continue
+                orientation, confirmed_img = verified
+                self.cfg["rect"] = candidate
+                color_changed = False
+                if self.cfg["auto_color"]:
+                    color_changed = self.cfg["color"] != orientation
+                    self.cfg["color"] = orientation
+                save_cfg(self.cfg)
+                if color_changed:
+                    self._refresh_controls()
+                self.last_board_image = confirmed_img
+                self.invalid_count = 0
+                self.relocation_failures = 0
+                self.stable_fen = None
+                self.stable_count = 0
+                if self.waiting_for == "our_move":
+                    # The existing arrow uses the old pixel rectangle. Request
+                    # fresh analysis so it is redrawn against the new board.
+                    self.waiting_for = "analysis"
+                    self.pending_move = None
+                    self.last_move_status = None
+                    self.post(self.overlay.clear)
+                self.post(
+                    lambda rect=candidate: self.overlay.set_board_rect(rect))
+                self.status("Board location verified — reading position…")
+                print("board located automatically:", candidate)
+                adopted = True
+                return True
+            return False
         except Exception as error:
             print("automatic board relocation failed:", error)
             return False
@@ -415,6 +416,28 @@ class Assistant:
                 self.template_index = original_template
                 self.relocation_failures = min(
                     self.relocation_failures + 1, 4)
+
+    def _verify_board_candidate(self, candidate):
+        """Return orientation and image after two stable, legal reads."""
+        candidate_img = capture.grab(candidate)
+        orientation, first_fen, _grid = self._classify_observation(
+            bm.grid_cells(candidate_img))
+        if (not bm.valid_placement(first_fen)
+                or not self._relocation_position_plausible(first_fen)):
+            return None
+
+        # A dialog, animation, or unrelated board can produce one convincing
+        # match. Require a second independent read before saving coordinates.
+        time.sleep(0.06)
+        confirmed_img = capture.grab(candidate)
+        confirmed_orientation, second_fen, _grid = (
+            self._classify_observation(bm.grid_cells(confirmed_img)))
+        if (second_fen != first_fen
+                or confirmed_orientation != orientation
+                or not bm.valid_placement(second_fen)
+                or not self._relocation_position_plausible(second_fen)):
+            return None
+        return orientation, confirmed_img
 
     def _relocation_position_plausible(self, fen_part):
         """Reject unrelated valid chessboards found elsewhere on screen."""

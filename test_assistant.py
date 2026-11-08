@@ -475,6 +475,38 @@ def test_failed_relocation_never_claims_the_board_moved():
     assert assistant.relocation_failures == 1
 
 
+def test_stale_startup_calibration_discovers_board_without_reference():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    original = [0, 0, 800, 800]
+    candidate = [200, 100, 1000, 900]
+    assistant.cfg["rect"] = original
+    assistant.cfg["auto_color"] = True
+    assistant.last_board_image = None
+    desktop = np.zeros((900, 1200, 3), dtype=np.uint8)
+    confirmed = np.ones((800, 800, 3), dtype=np.uint8)
+
+    with (unittest.mock.patch.object(
+              main.capture, "grab_virtual_screen",
+              return_value=(desktop, [0, 0, 1200, 900])),
+          unittest.mock.patch.object(
+              main.capture, "find_chessboard_rects",
+              return_value=[candidate]) as discover,
+          unittest.mock.patch.object(
+              assistant, "_verify_board_candidate",
+              return_value=("black", confirmed)),
+          unittest.mock.patch.object(main, "save_cfg")):
+        assert assistant._try_relocate_board() is True
+
+    assert discover.called
+    assert assistant.cfg["rect"] == candidate
+    assert assistant.cfg["color"] == "black"
+    assert assistant.last_board_image is confirmed
+    assert assistant.relocation_failures == 0
+    flush_ui(assistant)
+    assert ("board_rect", candidate) in assistant.overlay.calls
+
+
 def test_relocation_requires_two_identical_legal_reads():
     assistant = Assistant()
     assistant.overlay = FakeOverlay()
@@ -591,6 +623,7 @@ def load_tests(loader, tests, pattern):
         test_assistant_recovers_three_missed_half_moves,
         test_relocation_recalculates_arrow_for_new_coordinates,
         test_failed_relocation_never_claims_the_board_moved,
+        test_stale_startup_calibration_discovers_board_without_reference,
         test_relocation_requires_two_identical_legal_reads,
         test_relocation_rejects_an_unrelated_valid_board,
         test_auto_move_clicks_source_then_destination,
