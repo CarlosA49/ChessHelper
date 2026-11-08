@@ -1,4 +1,5 @@
 """Regression tests for setup asset validation."""
+import io
 import os
 import tempfile
 import unittest
@@ -11,6 +12,34 @@ import setup
 
 
 class SetupValidationTests(unittest.TestCase):
+    def test_fetch_streams_large_files_and_retries_transient_failures(self):
+        payload = b"a" * (2 * 1024 * 1024 + 7)
+
+        class ChunkedResponse(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        responses = [OSError("temporary failure"), ChunkedResponse(payload)]
+
+        def urlopen(*_args, **_kwargs):
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = os.path.join(tmp, "download.bin")
+            with (mock.patch.object(
+                      setup.urllib.request, "urlopen", side_effect=urlopen),
+                  mock.patch.object(setup.time, "sleep")):
+                setup.fetch("https://example.invalid/file", destination)
+            with open(destination, "rb") as downloaded:
+                self.assertEqual(downloaded.read(), payload)
+            self.assertFalse(os.path.exists(destination + ".part"))
+
     def test_template_requires_an_alpha_channel(self):
         with tempfile.TemporaryDirectory() as tmp:
             rgb_path = os.path.join(tmp, "rgb.png")

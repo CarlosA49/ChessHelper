@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -38,18 +39,28 @@ def valid_template(path):
         return False
 
 
-def fetch(url, dest):
-    req = urllib.request.Request(url, headers=UA)
+def fetch(url, dest, attempts=3):
+    """Download a file in chunks and retry transient network failures."""
     tmp = dest + ".part"
-    try:
-        with urllib.request.urlopen(req, timeout=90) as resp, open(tmp, "wb") as f:
-            f.write(resp.read())
-        if os.path.getsize(tmp) == 0:
-            raise RuntimeError("download returned an empty file")
-        os.replace(tmp, dest)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        req = urllib.request.Request(url, headers=UA)
+        try:
+            with (urllib.request.urlopen(req, timeout=120) as resp,
+                  open(tmp, "wb") as f):
+                while chunk := resp.read(1024 * 1024):
+                    f.write(chunk)
+            if os.path.getsize(tmp) == 0:
+                raise RuntimeError("download returned an empty file")
+            os.replace(tmp, dest)
+            return
+        except (OSError, RuntimeError, urllib.error.URLError) as error:
+            last_error = error
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            if attempt < attempts:
+                time.sleep(attempt)
+    raise last_error
 
 
 def setup_stockfish():
