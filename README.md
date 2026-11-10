@@ -121,5 +121,8 @@ Mac `Cmd+Option` combinations.
   waiting for the opponent's turn.
 - The overlay is click-through and invisible to the game page; all clicks land
   on chess.com as normal.
+- ChessHelper verifies click-through against the native overlay window and
+  reapplies it automatically. If verification fails, the overlay hides itself
+  so it cannot block manual or automatic piece movement.
 - On macOS, the capture path explicitly reads the windows beneath the overlay,
   so the animated guide cannot contaminate board recognition.

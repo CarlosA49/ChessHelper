@@ -14,6 +14,22 @@ CYAN_SOFT = "#78f3ff"
 NAVY = "#07141f"
 NAVY_LIGHT = "#102a3a"
 WHITE = "#f4fbff"
+WINDOWS_CLICK_THROUGH_FLAGS = (
+    0x00080000  # WS_EX_LAYERED
+    | 0x00000020  # WS_EX_TRANSPARENT
+    | 0x08000000  # WS_EX_NOACTIVATE
+    | 0x00000080  # WS_EX_TOOLWINDOW
+)
+
+
+def windows_click_through_style(style):
+    """Return a Windows extended style that cannot intercept board input."""
+    return style | WINDOWS_CLICK_THROUGH_FLAGS
+
+
+def is_windows_click_through(style):
+    return ((style & WINDOWS_CLICK_THROUGH_FLAGS)
+            == WINDOWS_CLICK_THROUGH_FLAGS)
 
 
 def screen_to_local(x, y, origin):
@@ -92,6 +108,8 @@ class Overlay:
         self._phase = 0.0
         self._status_ring = None
         self._animation_job = None
+        self._passthrough_job = None
+        self._passthrough_warning_shown = False
         self._controls_visible = True
         self._controls_state = ("white", True, False)
         self._mac_window = None
@@ -113,29 +131,105 @@ class Overlay:
         self.canvas = tk.Canvas(
             self.root, bg=transparent_bg, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
-        self._click_through()
+        # Tk creates a child drawing HWND before it maps the real top-level
+        # window. Native input styles applied before this update can therefore
+        # land on the wrong handle and leave an invisible fullscreen blocker.
+        self.root.update_idletasks()
         self.root.update()
         self.capture_excluded = self._exclude_from_capture()
+        self.input_passthrough = self.ensure_input_passthrough()
+        if not self.input_passthrough:
+            self.root.destroy()
+            raise RuntimeError(
+                "ChessHelper could not make its overlay click-through")
         self._animation_job = self.root.after(self.FRAME_MS, self._animate)
+        self._passthrough_job = self.root.after(
+            1000, self._maintain_input_passthrough)
 
     def _hwnd(self):
         if sys.platform != "win32":
             return None
-        return ctypes.windll.user32.GetParent(self.root.winfo_id())
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+        user32.GetAncestor.restype = wintypes.HWND
+        inner = self.root.winfo_id()
+        outer = user32.GetAncestor(inner, 2)  # GA_ROOT
+        return outer or inner
 
     def _click_through(self):
         if sys.platform != "win32":
-            return
+            return False
+        from ctypes import wintypes
+
         hwnd = self._hwnd()
+        if not hwnd:
+            return False
         GWL_EXSTYLE = -20
-        WS_EX_LAYERED = 0x00080000
-        WS_EX_TRANSPARENT = 0x00000020
-        WS_EX_NOACTIVATE = 0x08000000
-        WS_EX_TOOLWINDOW = 0x00000080
-        ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        ex |= (WS_EX_LAYERED | WS_EX_TRANSPARENT |
-               WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
-        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+        user32.GetWindowLongW.restype = ctypes.c_long
+        user32.SetWindowLongW.argtypes = (
+            wintypes.HWND, ctypes.c_int, ctypes.c_long)
+        user32.SetWindowLongW.restype = ctypes.c_long
+        user32.SetWindowPos.argtypes = (
+            wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT)
+        user32.SetWindowPos.restype = wintypes.BOOL
+
+        current = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if is_windows_click_through(current):
+            return True
+        desired = windows_click_through_style(current)
+        ctypes.set_last_error(0)
+        previous = user32.SetWindowLongW(hwnd, GWL_EXSTYLE, desired)
+        if previous == 0 and ctypes.get_last_error() != 0:
+            return False
+        # Notify Windows that the non-client/input style changed. The window
+        # remains in place and is never activated while this is applied.
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+        user32.SetWindowPos(
+            hwnd, None, 0, 0, 0, 0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER
+            | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+        return is_windows_click_through(
+            user32.GetWindowLongW(hwnd, GWL_EXSTYLE))
+
+    def ensure_input_passthrough(self):
+        """Verify the overlay cannot consume manual or automatic moves."""
+        if sys.platform == "win32":
+            passed = self._click_through()
+        elif sys.platform == "darwin" and self._mac_window is not None:
+            try:
+                self._mac_window.setIgnoresMouseEvents_(True)
+                passed = bool(self._mac_window.ignoresMouseEvents())
+            except Exception as error:
+                print("macOS click-through verification failed:", error)
+                passed = False
+        else:
+            passed = False
+        self.input_passthrough = passed
+        return passed
+
+    def _maintain_input_passthrough(self):
+        """Self-heal native styles and fail safely if they cannot be restored."""
+        try:
+            if not self.ensure_input_passthrough():
+                if not self._passthrough_warning_shown:
+                    print(
+                        "Overlay input protection failed; hiding the overlay "
+                        "so the chessboard remains usable.")
+                    self._passthrough_warning_shown = True
+                self.root.withdraw()
+            self._passthrough_job = self.root.after(
+                1000, self._maintain_input_passthrough)
+        except tk.TclError:
+            self._passthrough_job = None
 
     def _exclude_from_capture(self):
         """Keep the UI visible to the player but invisible to board capture."""
@@ -143,14 +237,20 @@ class Overlay:
             return self._configure_macos_window()
         if sys.platform != "win32":
             return False
+        from ctypes import wintypes
+
         WDA_EXCLUDEFROMCAPTURE = 0x00000011
         try:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.SetWindowDisplayAffinity.argtypes = (
+                wintypes.HWND, wintypes.DWORD)
+            user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
             for _attempt in range(3):
                 self.root.update_idletasks()
-                if ctypes.windll.user32.SetWindowDisplayAffinity(
+                if user32.SetWindowDisplayAffinity(
                         self._hwnd(), WDA_EXCLUDEFROMCAPTURE):
                     return True
-            error = ctypes.windll.kernel32.GetLastError()
+            error = ctypes.get_last_error()
             print("Windows could not exclude the overlay from capture:", error)
             return False
         except (AttributeError, OSError) as error:
@@ -398,6 +498,8 @@ class Overlay:
         try:
             if self._animation_job is not None:
                 self.root.after_cancel(self._animation_job)
+            if self._passthrough_job is not None:
+                self.root.after_cancel(self._passthrough_job)
             self.root.destroy()
         except Exception:
             pass

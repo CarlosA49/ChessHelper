@@ -8,7 +8,14 @@ import numpy as np
 import board as bm
 import capture
 from calibrate import grid_lines, normalize_rect, window_geometry
-from overlay import control_rows, move_label_position, screen_to_local
+from overlay import (
+    WINDOWS_CLICK_THROUGH_FLAGS,
+    control_rows,
+    is_windows_click_through,
+    move_label_position,
+    screen_to_local,
+    windows_click_through_style,
+)
 from test_assistant import test_start_position_queues_white_move_arrow
 
 START = chess.STARTING_FEN.split(" ")[0]
@@ -73,6 +80,17 @@ class OrientationTests(unittest.TestCase):
 
 
 class CalibrationTests(unittest.TestCase):
+    def test_windows_click_through_style_preserves_existing_flags(self):
+        existing = 0x00000008
+        updated = windows_click_through_style(existing)
+
+        self.assertTrue(is_windows_click_through(updated))
+        self.assertEqual(updated & existing, existing)
+        self.assertEqual(
+            updated & WINDOWS_CLICK_THROUGH_FLAGS,
+            WINDOWS_CLICK_THROUGH_FLAGS,
+        )
+
     def test_full_screen_discovery_finds_an_uncalibrated_board(self):
         board = np.zeros((640, 640, 3), dtype=np.uint8)
         light, dark = (235, 236, 208), (119, 149, 86)

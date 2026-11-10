@@ -755,6 +755,8 @@ class Assistant:
             try:
                 self.overlay.root.deiconify()
                 self.overlay.root.lift()
+                if not self.overlay.ensure_input_passthrough():
+                    self.overlay.root.withdraw()
             except Exception:
                 pass
         if error is not None:
