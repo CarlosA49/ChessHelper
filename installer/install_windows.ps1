@@ -27,7 +27,18 @@ function Test-BundledChecksum {
     }
     $expected = ([regex]::Match(
         $manifestLine, "^[0-9a-fA-F]{64}")).Value.ToLowerInvariant()
-    $actual = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stream = [IO.File]::OpenRead($archivePath)
+    try {
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = $algorithm.ComputeHash($stream)
+            $actual = ([BitConverter]::ToString($bytes) -replace "-", "").ToLowerInvariant()
+        } finally {
+            $algorithm.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
     if ($actual -ne $expected) {
         throw "The bundled Windows package failed checksum verification."
     }
