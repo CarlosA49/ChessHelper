@@ -28,6 +28,15 @@ jobs:
         run: python setup.py
       - name: Run tests
         run: python -m unittest discover -q
+      - name: Validate Windows installer syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "installer/install_windows.ps1"),
+            [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { throw ($errors | Out-String) }
       - name: Build application
         shell: pwsh
         run: |
@@ -71,6 +80,8 @@ jobs:
           chmod +x stockfish/stockfish
       - name: Run tests
         run: python -m unittest discover -q
+      - name: Validate macOS installer syntax
+        run: bash -n "installer/Install ChessHelper on macOS.command"
       - name: Build and ad-hoc sign application
         run: |
           pyinstaller --noconfirm --clean --windowed --name ChessHelper \
@@ -90,9 +101,44 @@ jobs:
           path: ChessHelper-macOS-${{ matrix.arch }}.zip
           if-no-files-found: error
 
+  bundle:
+    name: All-platform offline installer bundle
+    needs: [windows, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ChessHelper-*
+          path: downloads
+          merge-multiple: true
+      - name: Assemble and verify one-download bundle
+        run: |
+          mkdir -p package/ChessHelper-All-Platforms
+          cp downloads/ChessHelper-Windows-x64.zip \
+            downloads/ChessHelper-macOS-arm64.zip \
+            downloads/ChessHelper-macOS-x64.zip \
+            package/ChessHelper-All-Platforms/
+          cp installer/* package/ChessHelper-All-Platforms/
+          chmod +x \
+            "package/ChessHelper-All-Platforms/Install ChessHelper on macOS.command"
+          cd package/ChessHelper-All-Platforms
+          sha256sum ChessHelper-Windows-x64.zip \
+            ChessHelper-macOS-arm64.zip \
+            ChessHelper-macOS-x64.zip > SHA256SUMS.txt
+          cd ../..
+          python scripts/verify_bundle.py package/ChessHelper-All-Platforms
+          cd package
+          zip -r ../ChessHelper-All-Platforms.zip ChessHelper-All-Platforms
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChessHelper-All-Platforms
+          path: ChessHelper-All-Platforms.zip
+          if-no-files-found: error
+
   release:
     name: Publish private release
-    needs: [windows, mac]
+    needs: [windows, mac, bundle]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -113,5 +159,5 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "ChessHelper $TAG" \
-              --notes "Private Windows and macOS application packages."
+              --notes "Private self-contained Windows and macOS packages. Download ChessHelper-All-Platforms.zip for the offline one-click installers and every supported platform in one file."
           fi

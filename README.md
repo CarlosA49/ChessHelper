@@ -7,8 +7,16 @@ where to move.
 ## Private release packages
 
 The repository's private **Releases** page provides standalone Windows x64,
-macOS Apple Silicon, and macOS Intel packages. Extract the ZIP before running.
-On macOS, right-click `ChessHelper.app` and choose **Open** on first launch if
+macOS Apple Silicon, and macOS Intel packages. It also provides one unified
+`ChessHelper-All-Platforms.zip` containing every package and offline installer.
+Extract that outer ZIP, then run `Install ChessHelper on Windows.cmd` or
+`Install ChessHelper on macOS.command`. The installers detect the appropriate
+package, verify its SHA-256 checksum, preserve application-data settings during
+updates, install a user-local copy, and launch ChessHelper. Python, Stockfish,
+piece templates, and runtime libraries are bundled; no dependency download is
+required.
+
+On macOS, right-click the installer and choose **Open** on first launch if
 Gatekeeper asks for confirmation. Packaged settings are stored in the user's
 application-data directory rather than inside the application bundle.
 

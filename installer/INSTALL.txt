@@ -1,0 +1,36 @@
+CHESSHELPER ALL-PLATFORMS INSTALLER
+===================================
+
+This single download contains the complete Windows x64, Apple Silicon Mac,
+and Intel Mac applications. Python, Stockfish, piece templates, and runtime
+libraries are already included. No developer tools or dependency downloads are
+required.
+
+IMPORTANT: Extract the outer ChessHelper-All-Platforms.zip before installing.
+Do not run an installer from inside the ZIP preview.
+
+WINDOWS 10/11 (x64)
+-------------------
+1. Double-click "Install ChessHelper on Windows.cmd".
+2. The checksum is verified and ChessHelper is installed for your account.
+3. Use the new Desktop or Start Menu shortcut.
+
+MACOS
+-----
+1. Right-click "Install ChessHelper on macOS.command" and choose Open.
+2. The installer automatically selects Apple Silicon or Intel, verifies the
+   package and installs ChessHelper under your Applications folder.
+3. Grant Screen Recording and Accessibility when macOS requests them, then
+   reopen ChessHelper.
+
+CONTROLS
+--------
+F7             Show or hide the control guide
+F8             Quit
+F9             Pause or resume
+F10            Recalibrate only when automatic recovery cannot find the board
+Ctrl+Alt+M      Toggle automatic moves on Windows
+Cmd+Option+M    Toggle automatic moves on macOS
+
+Automatic moves are disabled after every restart and must be enabled for the
+current session. Promotions remain manual.
