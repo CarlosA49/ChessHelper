@@ -361,6 +361,31 @@ def test_invalid_frame_breaks_stability_without_replacing_reference():
     assert assistant.last_board_image is reference
 
 
+def test_active_game_relocation_waits_through_transient_read_lag():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    assistant.templates = [{}]
+    assistant.cfg["rect"] = [0, 0, 800, 800]
+    assistant.last_board_image = np.ones((8, 8, 3), dtype=np.uint8)
+    assistant.invalid_count = 19
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    with (unittest.mock.patch.object(main.capture, "grab", return_value=image),
+          unittest.mock.patch.object(main.bm, "grid_cells", return_value=[]),
+          unittest.mock.patch.object(
+              assistant, "_classify_observation",
+              return_value=("white", "bad", [])),
+          unittest.mock.patch.object(main.bm, "valid_placement", return_value=False),
+          unittest.mock.patch.object(main.time, "monotonic", return_value=100.0),
+          unittest.mock.patch.object(
+              assistant, "_try_relocate_board") as relocate):
+        assistant.tick()
+        assert not relocate.called
+        assistant.invalid_count = 59
+        assistant.tick()
+        assert relocate.call_count == 1
+
+
 def test_classifier_prefers_legal_history_over_lower_visual_error():
     assistant = Assistant()
     assistant.cfg["auto_color"] = False
@@ -581,6 +606,68 @@ def test_auto_move_clicks_source_then_destination():
         ("position", bm.square_center(chess.E4, assistant.cfg["rect"], "white")),
         ("click", main.mouse.Button.left),
     ]
+    assert assistant.auto_move_attempts == 1
+
+
+def test_unconfirmed_auto_move_retries_with_drag_fallback():
+    assistant = Assistant()
+    assistant.cfg["rect"] = [100, 200, 900, 1000]
+    assistant.cfg["color"] = "white"
+    assistant.cfg["auto_move"] = True
+    move = chess.Move.from_uci("e2e4")
+    assistant.pending_move = move
+    assistant.waiting_for = "our_move"
+    assistant.auto_move_attempts = 1
+    assistant.auto_move_last_attempt = 10.0
+    events = []
+
+    class FakeMouse:
+        @property
+        def position(self):
+            return None
+
+        @position.setter
+        def position(self, value):
+            events.append(("position", value))
+
+        def press(self, button):
+            events.append(("press", button))
+
+        def release(self, button):
+            events.append(("release", button))
+
+    with (unittest.mock.patch.object(
+              main.mouse, "Controller", return_value=FakeMouse()),
+          unittest.mock.patch.object(main.time, "sleep"),
+          unittest.mock.patch.object(main.time, "monotonic", return_value=12.0)):
+        worker = assistant._retry_auto_move_if_needed()
+        worker.join(timeout=2)
+
+    assert events == [
+        ("position", bm.square_center(chess.E2, assistant.cfg["rect"], "white")),
+        ("press", main.mouse.Button.left),
+        ("position", bm.square_center(chess.E4, assistant.cfg["rect"], "white")),
+        ("release", main.mouse.Button.left),
+    ]
+    assert assistant.auto_move_attempts == 2
+
+
+def test_auto_move_stops_retrying_after_bounded_attempts():
+    assistant = Assistant()
+    assistant.overlay = FakeOverlay()
+    assistant.cfg["auto_move"] = True
+    assistant.pending_move = chess.Move.from_uci("e2e4")
+    assistant.waiting_for = "our_move"
+    assistant.auto_move_attempts = main.AUTO_MOVE_MAX_ATTEMPTS
+    assistant.auto_move_last_attempt = 1.0
+
+    with (unittest.mock.patch.object(main.time, "monotonic", return_value=10.0),
+          unittest.mock.patch.object(assistant, "_start_auto_move") as start):
+        assert assistant._retry_auto_move_if_needed() is None
+
+    assert not start.called
+    flush_ui(assistant)
+    assert "play this move manually" in assistant.overlay.calls[-1][1]
 
 
 def test_auto_move_never_clicks_promotions():
@@ -619,6 +706,7 @@ def load_tests(loader, tests, pattern):
         test_status_recovers_after_transient_unreadable_frame,
         test_browser_safe_color_hotkey_disables_auto_detection,
         test_invalid_frame_breaks_stability_without_replacing_reference,
+        test_active_game_relocation_waits_through_transient_read_lag,
         test_classifier_prefers_legal_history_over_lower_visual_error,
         test_assistant_recovers_three_missed_half_moves,
         test_relocation_recalculates_arrow_for_new_coordinates,
@@ -627,6 +715,8 @@ def load_tests(loader, tests, pattern):
         test_relocation_requires_two_identical_legal_reads,
         test_relocation_rejects_an_unrelated_valid_board,
         test_auto_move_clicks_source_then_destination,
+        test_unconfirmed_auto_move_retries_with_drag_fallback,
+        test_auto_move_stops_retrying_after_bounded_attempts,
         test_auto_move_never_clicks_promotions,
     ):
         suite.addTest(unittest.FunctionTestCase(fn))

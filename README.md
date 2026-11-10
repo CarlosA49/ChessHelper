@@ -68,9 +68,11 @@ current side and `AUTO` or `MANUAL` orientation mode.
 
 Automatic moves are disabled at every launch and require an explicit opt-in
 for the current session. When enabled, ChessHelper clicks the suggested source
-and destination squares after analysis. Promotions remain manual so the
-desired promotion piece can be selected safely. Use automated play only on
-boards and game modes whose rules permit it.
+and destination squares after analysis. If an unchanged board confirms that
+the browser missed the input, it retries with a drag gesture, up to three
+attempts. Promotions remain manual so the desired promotion piece can be
+selected safely. Use automated play only on boards and game modes whose rules
+permit it.
 
 On a Mac keyboard configured to use media controls, hold `fn` while pressing
 the function-key shortcuts. The on-screen guide automatically shows the native
@@ -99,6 +101,8 @@ Mac `Cmd+Option` combinations.
   do not require recalibration.
 - If saved coordinates are stale at startup, ChessHelper scans the visible
   desktop for an 8x8 board and saves its location only after two legal reads.
+- During an active game, location recovery waits through sustained read
+  failures and ignores movements smaller than normal matching jitter.
 - Keep the entire board visible and uncovered. ChessHelper reads visible screen
   pixels, so another window over the board prevents recognition.
 - Restart `start.bat` after updating the project so the new calibration window

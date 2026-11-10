@@ -47,6 +47,8 @@ CONFIG = os.environ.get("CHESSHELPER_CONFIG", default_config_path())
 LOCAL_STOCKFISH = os.path.join(
     BASE, "stockfish", "stockfish.exe" if sys.platform == "win32" else "stockfish")
 CONFIG_LOCK = threading.Lock()
+AUTO_MOVE_MAX_ATTEMPTS = 3
+AUTO_MOVE_RETRY_DELAY = 1.5
 
 
 def side_shortcuts(platform=None):
@@ -201,6 +203,8 @@ class Assistant:
         self.last_relocation_attempt = 0.0
         self.relocation_failures = 0
         self.auto_move_in_progress = False
+        self.auto_move_attempts = 0
+        self.auto_move_last_attempt = 0.0
         self.last_status = None
 
     # ---------- overlay plumbing (main thread) ----------
@@ -317,7 +321,8 @@ class Assistant:
                     "press F10 only if it moved")
             relocation_delay = min(
                 120, 15 * (2 ** min(self.relocation_failures, 3)))
-            if (self.invalid_count >= 20
+            relocation_threshold = 20 if self.last_board_image is None else 60
+            if (self.invalid_count >= relocation_threshold
                     and time.monotonic() - self.last_relocation_attempt
                     >= relocation_delay):
                 if self.last_board_image is None:
@@ -349,6 +354,8 @@ class Assistant:
         if fen_part == self.prev_fen:
             if self.waiting_for == "analysis" and self.position is not None:
                 self._suggest_move(self.cfg["color"][0])
+            elif self.waiting_for == "our_move":
+                self._retry_auto_move_if_needed()
             else:
                 self._restore_status()
             return
@@ -374,7 +381,7 @@ class Assistant:
             for candidate in candidates:
                 if (self.last_board_image is not None
                         and capture.rects_are_near(
-                            candidate, self.cfg.get("rect"))):
+                            candidate, self.cfg.get("rect"), tolerance=0.03)):
                     continue
                 self.template_index = original_template
                 verified = self._verify_board_candidate(candidate)
@@ -399,6 +406,7 @@ class Assistant:
                     # fresh analysis so it is redrawn against the new board.
                     self.waiting_for = "analysis"
                     self.pending_move = None
+                    self._clear_auto_move_retry()
                     self.last_move_status = None
                     self.post(self.overlay.clear)
                 self.post(
@@ -481,6 +489,7 @@ class Assistant:
                 self.prev_fen = fen_part
                 self.waiting_for = "opponent"
                 self.pending_move = None
+                self._clear_auto_move_retry()
                 self.post(self.overlay.clear)
                 self.status("Move confirmed — waiting for opponent")
                 self._clear_rejected_position()
@@ -491,6 +500,8 @@ class Assistant:
                 self.position.push(moves[0])
                 self.position.push(moves[1])
                 self.prev_fen = fen_part
+                self.pending_move = None
+                self._clear_auto_move_retry()
                 self._clear_rejected_position()
                 self._suggest_move(me)
                 return
@@ -529,6 +540,7 @@ class Assistant:
                     self.position.push(move)
                 self.prev_fen = fen_part
                 self.pending_move = None
+                self._clear_auto_move_retry()
                 self._clear_rejected_position()
                 if self.position.turn == (me == "w"):
                     self._suggest_move(me)
@@ -567,6 +579,7 @@ class Assistant:
         if not best:
             self.post(self.overlay.clear)
             self.pending_move = None
+            self._clear_auto_move_retry()
             self.waiting_for = None
             self.status("No legal move found — check whether the game ended")
             return
@@ -588,6 +601,8 @@ class Assistant:
             mv.to_square, self.cfg["rect"], self.cfg["color"])
         self.post(lambda x1=x1, y1=y1, x2=x2, y2=y2, label=label:
                   self.overlay.show_arrow(x1, y1, x2, y2, label))
+        if self.pending_move != mv:
+            self._clear_auto_move_retry()
         self.pending_move = mv
         self.waiting_for = "our_move"
         self.last_move_status = f"Suggested move: {san} — follow the arrow"
@@ -596,7 +611,7 @@ class Assistant:
         self._start_auto_move(mv)
 
     def _start_auto_move(self, move):
-        """Click a suggested move when the explicit auto-move mode is on."""
+        """Play a suggested move, using drag fallback on confirmed retries."""
         if (not self.cfg.get("auto_move") or self.auto_move_in_progress
                 or self.paused or not self.running):
             return None
@@ -604,11 +619,16 @@ class Assistant:
             self.status(
                 "Promotion ready — move manually to choose the promoted piece")
             return None
+        if self.auto_move_attempts >= AUTO_MOVE_MAX_ATTEMPTS:
+            return None
 
         start = bm.square_center(
             move.from_square, self.cfg["rect"], self.cfg["color"])
         end = bm.square_center(
             move.to_square, self.cfg["rect"], self.cfg["color"])
+        self.auto_move_attempts += 1
+        attempt = self.auto_move_attempts
+        self.auto_move_last_attempt = time.monotonic()
         self.auto_move_in_progress = True
 
         def perform():
@@ -620,15 +640,32 @@ class Assistant:
                     return
                 controller = mouse.Controller()
                 controller.position = start
-                controller.click(mouse.Button.left)
-                time.sleep(0.04)
-                if (not self.cfg.get("auto_move") or self.paused
-                        or self.pending_move != move
-                        or self.waiting_for != "our_move"):
-                    return
-                controller.position = end
-                controller.click(mouse.Button.left)
-                self.status("Move played automatically — confirming board…")
+                if attempt == 1:
+                    controller.click(mouse.Button.left)
+                    time.sleep(0.10)
+                    if (not self.cfg.get("auto_move") or self.paused
+                            or self.pending_move != move
+                            or self.waiting_for != "our_move"):
+                        return
+                    controller.position = end
+                    controller.click(mouse.Button.left)
+                else:
+                    pressed = False
+                    try:
+                        controller.press(mouse.Button.left)
+                        pressed = True
+                        time.sleep(0.10)
+                        if (not self.cfg.get("auto_move") or self.paused
+                                or self.pending_move != move
+                                or self.waiting_for != "our_move"):
+                            return
+                        controller.position = end
+                        time.sleep(0.06)
+                    finally:
+                        if pressed:
+                            controller.release(mouse.Button.left)
+                self.status(
+                    f"Automatic move attempt {attempt} — confirming board…")
             except Exception as error:
                 print("automatic move failed:", error)
                 self.status(
@@ -639,6 +676,30 @@ class Assistant:
         worker = threading.Thread(target=perform, daemon=True)
         worker.start()
         return worker
+
+    def _retry_auto_move_if_needed(self):
+        """Retry only after the unchanged board confirms a missed input."""
+        move = self.pending_move
+        if (not self.cfg.get("auto_move") or move is None
+                or move.promotion is not None or self.auto_move_in_progress):
+            self._restore_status()
+            return None
+        elapsed = time.monotonic() - self.auto_move_last_attempt
+        if elapsed < AUTO_MOVE_RETRY_DELAY:
+            self._restore_status()
+            return None
+        if self.auto_move_attempts >= AUTO_MOVE_MAX_ATTEMPTS:
+            self.status(
+                "Automatic move was not confirmed — play this move manually")
+            return None
+        self.status(
+            f"Move not confirmed — retrying automatically "
+            f"({self.auto_move_attempts + 1}/{AUTO_MOVE_MAX_ATTEMPTS})…")
+        return self._start_auto_move(move)
+
+    def _clear_auto_move_retry(self):
+        self.auto_move_attempts = 0
+        self.auto_move_last_attempt = 0.0
 
     def _restore_status(self):
         """Restore useful state text after temporary capture noise."""
@@ -659,6 +720,7 @@ class Assistant:
         self.pending_move = None
         self.waiting_for = None
         self.last_move_status = None
+        self._clear_auto_move_retry()
         self._clear_rejected_position()
 
     def loop(self):
@@ -772,6 +834,7 @@ class Assistant:
             self.status("Automatic side detection enabled — reading board…")
         elif key_name == "auto_move":
             self.cfg["auto_move"] = not self.cfg["auto_move"]
+            self._clear_auto_move_retry()
             self._refresh_controls()
             self.last_status = None
             state = "enabled" if self.cfg["auto_move"] else "disabled"
